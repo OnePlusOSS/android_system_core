@@ -678,7 +678,7 @@ service encrypt /system/bin/vdc --wait cryptfs enablecrypto inplace default noui
 
 service bootanim /system/bin/bootanimation
     class core
-    user graphics
+    user media
     group graphics audio
     disabled
     oneshot
