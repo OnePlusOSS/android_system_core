@@ -41,6 +41,7 @@ int CreateSocket(const char* name, int type, bool passcred, mode_t perm, uid_t u
 
 bool ReadFile(const std::string& path, std::string* content, std::string* err);
 bool WriteFile(const std::string& path, const std::string& content, std::string* err);
+bool write_file_follow(const std::string& path, const std::string& content);
 
 bool DecodeUid(const std::string& name, uid_t* uid, std::string* err);
 
