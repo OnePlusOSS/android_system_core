@@ -77,7 +77,10 @@
 #define AID_SDCARD_ALL    1035  /* access all users external storage */
 #define AID_LOGD          1036  /* log daemon */
 #define AID_SHARED_RELRO  1037  /* creator of shared GNU RELRO files */
-
+//#ifdef VENDOR_EDIT
+//ruanbanmao add for spi of eSE.
+#define AID_SPI           1038  /* spi subsystem */
+//#endif
 #define AID_SHELL         2000  /* adb and debug shell user */
 #define AID_CACHE         2001  /* cache access */
 #define AID_DIAG          2002  /* access to diagnostic resources */
@@ -174,6 +177,10 @@ static const struct android_id_info android_ids[] = {
     { "sdcard_all",    AID_SDCARD_ALL, },
     { "logd",          AID_LOGD, },
     { "shared_relro",  AID_SHARED_RELRO, },
+	//#ifdef VENDOR_EDIT
+    //ruanbanmao add for spi of eSE.
+    { "spi",       AID_SPI, },
+	//#endif
 
     { "shell",         AID_SHELL, },
     { "cache",         AID_CACHE, },
