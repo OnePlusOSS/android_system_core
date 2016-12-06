@@ -68,13 +68,6 @@ on init
     chmod 0664 /dev/stune/background/tasks
     chmod 0664 /dev/stune/system-background/tasks
     chmod 0664 /dev/stune/top-app/tasks
-    write /dev/stune/foreground/schedtune.sched_boost_no_override 1
-    write /dev/stune/top-app/schedtune.sched_boost_no_override 1
-    write /dev/stune/schedtune.colocate 0
-    write /dev/stune/background/schedtune.colocate 0
-    write /dev/stune/system-background/schedtune.colocate 0
-    write /dev/stune/foreground/schedtune.colocate 0
-    write /dev/stune/top-app/schedtune.colocate 1
 
     # Mount staging areas for devices managed by vold
     # See storage config details at http://source.android.com/tech/storage/
