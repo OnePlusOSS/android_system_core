@@ -33,6 +33,8 @@
 #include <cutils/sockets.h>
 #include <log/log.h>
 #include <processgroup/processgroup.h>
+#include <dlfcn.h>
+#include <cutils/properties.h>
 
 #ifndef __unused
 #define __unused __attribute__((__unused__))
@@ -60,6 +62,12 @@ enum lmk_cmd {
  * values
  */
 #define CTRL_PACKET_MAX (sizeof(int) * (MAX_TARGETS * 2 + 1))
+
+static void* memperf_opt_handle = NULL;
+static int (*memperf_init_fn)(void) = NULL;
+static int (*memperf_am_update_fn)(void*,unsigned int) = NULL;
+static void init_memperf();
+static void de_init_memperf();
 
 /* default to old in-kernel interface if no memory pressure events */
 static int use_inkernel_interface = 1;
@@ -355,6 +363,14 @@ static void ctrl_command_handler(void) {
     nargs = len / sizeof(int) - 1;
     if (nargs < 0)
         goto wronglen;
+
+    if (memperf_am_update_fn) {
+        int ret = (*memperf_am_update_fn)(ibuf, sizeof(ibuf));
+        if (ret == -1) {
+            ALOGE("Received Error from mem_ctl. unloading the module %d", ret);
+            de_init_memperf();
+        }
+    }
 
     cmd = ntohl(ibuf[0]);
 
@@ -804,6 +820,46 @@ static void mainloop(void) {
     }
 }
 
+static void de_init_memperf() {
+    memperf_init_fn = NULL;
+    memperf_am_update_fn = NULL;
+
+    if (memperf_opt_handle) dlclose(memperf_opt_handle);
+
+    memperf_opt_handle = NULL;
+}
+
+static void init_memperf() {
+    int mem_ctl_enable = 0;
+    mem_ctl_enable = property_get_bool("ro.memperf.enable", 0);
+    if (mem_ctl_enable) {
+        char prop[PROPERTY_VALUE_MAX];
+        memset(prop, '\0', sizeof(prop));
+        property_get("ro.memperf.lib", prop, "");
+        memperf_opt_handle = dlopen(prop, RTLD_LAZY);
+        if (memperf_opt_handle != NULL) {
+            dlerror();
+            memperf_init_fn = (int(*)(void))dlsym(memperf_opt_handle, "init_mperfd");
+            memperf_am_update_fn = (int(*)(void*,unsigned int))dlsym(memperf_opt_handle, "amUpdate");
+            const char *dlsym_error = dlerror();
+
+            if((memperf_am_update_fn == NULL) || (memperf_init_fn == NULL)) {
+                ALOGD("Error loading symbol. dlerror : %s", dlsym_error);
+                de_init_memperf();
+            }
+
+            if (memperf_init_fn) {
+                if (-1 == (*memperf_init_fn)()) {
+                    ALOGE("Error during init. Disabling memperf !!!!");
+                    de_init_memperf();
+                }
+            }
+        } else {
+            ALOGE("Failed to load library");
+        }
+    }
+}
+
 int main(int argc __unused, char **argv __unused) {
     struct sched_param param = {
             .sched_priority = 1,
@@ -811,9 +867,15 @@ int main(int argc __unused, char **argv __unused) {
 
     mlockall(MCL_FUTURE);
     sched_setscheduler(0, SCHED_FIFO, &param);
+
+    init_memperf();
+
     if (!init())
         mainloop();
 
+    if (memperf_opt_handle) {
+        de_init_memperf();
+    }
     ALOGI("exiting");
     return 0;
 }
