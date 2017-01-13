@@ -34,6 +34,7 @@
 #include "LogBuffer.h"
 #include "LogKlog.h"
 #include "LogReader.h"
+#include "LogUtils.h"
 
 #define KMSG_PRIORITY(PRI)                          \
     '<',                                            \
@@ -42,15 +43,60 @@
     '>'
 
 LogAudit::LogAudit(LogBuffer *buf, LogReader *reader, int fdDmesg) :
-        SocketListener(getLogSocket(), false),
+        SocketListener(mSock = getLogSocket(), false),
         logbuf(buf),
         reader(reader),
         fdDmesg(fdDmesg),
-        initialized(false) {
+        main(__android_logger_property_get_bool("ro.logd.auditd.main",
+                                                BOOL_DEFAULT_TRUE)),
+        events(__android_logger_property_get_bool("ro.logd.auditd.events",
+                                                  BOOL_DEFAULT_TRUE)),
+        initialized(false),
+        tooFast(false) {
     static const char auditd_message[] = { KMSG_PRIORITY(LOG_INFO),
         'l', 'o', 'g', 'd', '.', 'a', 'u', 'd', 'i', 't', 'd', ':',
         ' ', 's', 't', 'a', 'r', 't', '\n' };
     write(fdDmesg, auditd_message, sizeof(auditd_message));
+}
+
+void LogAudit::checkRateLimit() {
+
+    // trim list for AUDIT_RATE_LIMIT_BURST_DURATION of history
+    log_time oldest(AUDIT_RATE_LIMIT_BURST_DURATION, 0);
+    bucket.emplace(android_log_clockid());
+    oldest = bucket.back() - oldest;
+    while (bucket.front() < oldest) bucket.pop();
+
+    static const size_t upperThreshold =
+        ((AUDIT_RATE_LIMIT_BURST_DURATION *
+          (AUDIT_RATE_LIMIT_DEFAULT + AUDIT_RATE_LIMIT_MAX)) + 1) /
+                              2;
+    if (bucket.size() >= upperThreshold) {
+        // Hit peak, slow down source
+        if (!tooFast) {
+            tooFast = true;
+            audit_rate_limit(mSock, AUDIT_RATE_LIMIT_MAX);
+        }
+
+        // We do not need to hold on to the full set of timing data history,
+        // let's ensure it does not grow without bounds.  This also ensures
+        // that std::dequeue underneath behaves almost like a ring buffer.
+        do {
+            bucket.pop();
+        } while (bucket.size() >= upperThreshold);
+        return;
+    }
+
+    if (!tooFast) return;
+
+    static const size_t lowerThreshold = AUDIT_RATE_LIMIT_BURST_DURATION *
+                                         AUDIT_RATE_LIMIT_MAX;
+
+    if (bucket.size() >= lowerThreshold) return;
+
+    tooFast = false;
+    // Went below max sustained rate, allow source to speed up
+    audit_rate_limit(mSock, AUDIT_RATE_LIMIT_DEFAULT);
 }
 
 bool LogAudit::onDataAvailable(SocketClient *cli) {
@@ -58,6 +104,8 @@ bool LogAudit::onDataAvailable(SocketClient *cli) {
         prctl(PR_SET_NAME, "logd.auditd");
         initialized = true;
     }
+
+    checkRateLimit();
 
     struct audit_message rep;
 
@@ -70,8 +118,7 @@ bool LogAudit::onDataAvailable(SocketClient *cli) {
         return false;
     }
 
-    logPrint("type=%d %.*s",
-        rep.nlh.nlmsg_type, rep.nlh.nlmsg_len, rep.data);
+    logPrint("type=%d %.*s", rep.nlh.nlmsg_type, rep.nlh.nlmsg_len, rep.data);
 
     return true;
 }
@@ -93,6 +140,13 @@ int LogAudit::logPrint(const char *fmt, ...) {
     }
 
     char *cp;
+    // Work around kernels missing
+    // https://github.com/torvalds/linux/commit/b8f89caafeb55fba75b74bea25adc4e4cd91be67
+    // Such kernels improperly add newlines inside audit messages.
+    while ((cp = strchr(str, '\n'))) {
+        *cp = ' ';
+    }
+
     while ((cp = strstr(str, "  "))) {
         memmove(cp, cp + 1, strlen(cp + 1) + 1);
     }
@@ -117,7 +171,8 @@ int LogAudit::logPrint(const char *fmt, ...) {
             if (avcl) {
                 char *avcr = strstr(str, avc);
 
-                skip = avcr && !strcmp(avcl + strlen(avc), avcr + strlen(avc));
+                skip = avcr && !fastcmp<strcmp>(avcl + strlen(avc),
+                                                avcr + strlen(avc));
                 if (skip) {
                     ++count;
                     free(last_str);
@@ -170,6 +225,11 @@ int LogAudit::logPrint(const char *fmt, ...) {
         }
     }
 
+    if (!main && !events) {
+        free(str);
+        return 0;
+    }
+
     pid_t pid = getpid();
     pid_t tid = gettid();
     uid_t uid = AID_LOGD;
@@ -220,7 +280,7 @@ int LogAudit::logPrint(const char *fmt, ...) {
 
     bool notify = false;
 
-    {   // begin scope for event buffer
+    if (events) {   // begin scope for event buffer
         uint32_t buffer[(n + sizeof(uint32_t) - 1) / sizeof(uint32_t)];
 
         android_log_event_string_t *event
@@ -275,7 +335,7 @@ int LogAudit::logPrint(const char *fmt, ...) {
     size_t e = strnlen(ecomm, LOGGER_ENTRY_MAX_PAYLOAD - b);
     n = b + e + l + 2;
 
-    {   // begin scope for main buffer
+    if (main) {   // begin scope for main buffer
         char newstr[n];
 
         *newstr = info ? ANDROID_LOG_INFO : ANDROID_LOG_WARN;
@@ -333,5 +393,6 @@ int LogAudit::getLogSocket() {
         audit_close(fd);
         fd = -1;
     }
+    (void)audit_rate_limit(fd, AUDIT_RATE_LIMIT_DEFAULT);
     return fd;
 }

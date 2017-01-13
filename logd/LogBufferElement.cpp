@@ -50,6 +50,19 @@ LogBufferElement::LogBufferElement(log_id_t log_id, log_time realtime,
         0;
 }
 
+LogBufferElement::LogBufferElement(const LogBufferElement &elem) :
+        mTag(elem.mTag),
+        mUid(elem.mUid),
+        mPid(elem.mPid),
+        mTid(elem.mTid),
+        mSequence(elem.mSequence),
+        mRealTime(elem.mRealTime),
+        mMsgLen(elem.mMsgLen),
+        mLogId(elem.mLogId) {
+    mMsg = new char[mMsgLen];
+    memcpy(mMsg, elem.mMsg, mMsgLen);
+}
+
 LogBufferElement::~LogBufferElement() {
     delete [] mMsg;
 }
@@ -89,7 +102,7 @@ char *android::tidToName(pid_t tid) {
         size_t name_len = strlen(name);
         // KISS: ToDo: Only checks prefix truncated, not suffix, or both
         if ((retval_len < name_len)
-                && !fast<strcmp>(retval, name + name_len - retval_len)) {
+                && !fastcmp<strcmp>(retval, name + name_len - retval_len)) {
             free(retval);
             retval = name;
         } else {
@@ -157,8 +170,6 @@ size_t LogBufferElement::populateDroppedMessage(char *&buffer,
                           mDropped, (mDropped > 1) ? "s" : "");
 
     size_t hdrLen;
-    // LOG_ID_SECURITY not strictly needed since spam filter not activated,
-    // but required for accuracy.
     if (isBinary()) {
         hdrLen = sizeof(android_log_event_string_t);
     } else {

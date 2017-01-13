@@ -38,6 +38,7 @@
 #include <linux/loop.h>
 #include <linux/module.h>
 
+#include <string>
 #include <thread>
 
 #include <selinux/android.h>
@@ -66,6 +67,8 @@
 #include "service.h"
 #include "signal_handler.h"
 #include "util.h"
+
+using namespace std::literals::string_literals;
 
 #define chmod DO_NOT_USE_CHMOD_USE_FCHMODAT_SYMLINK_NOFOLLOW
 #define UNMOUNT_CHECK_TIMES 10
@@ -139,15 +142,13 @@ static void turnOffBacklight() {
     }
 }
 
-static int wipe_data_via_recovery(const std::string& reason) {
-    const std::vector<std::string> options = {"--wipe_data", std::string() + "--reason=" + reason};
+static int reboot_into_recovery(const std::vector<std::string>& options) {
     std::string err;
     if (!write_bootloader_message(options, &err)) {
         LOG(ERROR) << "failed to set bootloader message: " << err;
         return -1;
     }
-    android_reboot(ANDROID_RB_RESTART2, 0, "recovery");
-    while (1) { pause(); }  // never reached
+    reboot("recovery");
 }
 
 static void unmount_and_fsck(const struct mntent *entry) {
@@ -248,7 +249,7 @@ static int do_class_reset(const std::vector<std::string>& args) {
 }
 
 static int do_domainname(const std::vector<std::string>& args) {
-    return write_file("/proc/sys/kernel/domainname", args[1].c_str());
+    return write_file("/proc/sys/kernel/domainname", args[1].c_str()) ? 0 : 1;
 }
 
 static int do_enable(const std::vector<std::string>& args) {
@@ -276,7 +277,7 @@ static int do_export(const std::vector<std::string>& args) {
 }
 
 static int do_hostname(const std::vector<std::string>& args) {
-    return write_file("/proc/sys/kernel/hostname", args[1].c_str());
+    return write_file("/proc/sys/kernel/hostname", args[1].c_str()) ? 0 : 1;
 }
 
 static int do_ifup(const std::vector<std::string>& args) {
@@ -339,7 +340,10 @@ static int do_mkdir(const std::vector<std::string>& args) {
 
     if (e4crypt_is_native()) {
         if (e4crypt_set_directory_policy(args[1].c_str())) {
-            wipe_data_via_recovery(std::string() + "set_policy_failed:" + args[1]);
+            const std::vector<std::string> options = {
+                "--prompt_and_wipe_data",
+                "--reason=set_policy_failed:"s + args[1]};
+            reboot_into_recovery(options);
             return -1;
         }
     }
@@ -560,7 +564,8 @@ static int queue_fs_event(int code) {
     } else if (code == FS_MGR_MNTALL_DEV_NEEDS_RECOVERY) {
         /* Setup a wipe via recovery, and reboot into recovery */
         PLOG(ERROR) << "fs_mgr_mount_all suggested recovery, so wiping data via recovery.";
-        ret = wipe_data_via_recovery("wipe_data_via_recovery");
+        const std::vector<std::string> options = {"--wipe_data", "--reason=fs_mgr_mount_all" };
+        ret = reboot_into_recovery(options);
         /* If reboot worked, there is no return. */
     } else if (code == FS_MGR_MNTALL_DEV_FILE_ENCRYPTED) {
         if (e4crypt_install_keyring()) {
@@ -732,7 +737,7 @@ static int do_powerctl(const std::vector<std::string>& args) {
         ServiceManager::GetInstance().ForEachService(
             [] (Service* s) { s->Terminate(); });
 
-        while (t.duration() < delay) {
+        while (t.duration_s() < delay) {
             ServiceManager::GetInstance().ReapAnyOutstandingChildren();
 
             int service_count = 0;
@@ -756,11 +761,10 @@ static int do_powerctl(const std::vector<std::string>& args) {
             // Wait a bit before recounting the number or running services.
             std::this_thread::sleep_for(50ms);
         }
-        LOG(VERBOSE) << "Terminating running services took " << t.duration() << " seconds";
+        LOG(VERBOSE) << "Terminating running services took " << t;
     }
 
-    return android_reboot_with_callback(cmd, 0, reboot_target,
-                                        callback_on_ro_remount);
+    return android_reboot_with_callback(cmd, 0, reboot_target, callback_on_ro_remount);
 }
 
 static int do_trigger(const std::vector<std::string>& args) {
@@ -810,7 +814,7 @@ static int do_verity_update_state(const std::vector<std::string>& args) {
 static int do_write(const std::vector<std::string>& args) {
     const char* path = args[1].c_str();
     const char* value = args[2].c_str();
-    return write_file(path, value);
+    return write_file(path, value) ? 0 : 1;
 }
 
 static int do_copy(const std::vector<std::string>& args) {
@@ -1030,7 +1034,7 @@ static int do_init_user0(const std::vector<std::string>& args) {
 BuiltinFunctionMap::Map& BuiltinFunctionMap::map() const {
     constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
     static const Map builtin_functions = {
-        {"bootchart_init",          {0,     0,    do_bootchart_init}},
+        {"bootchart",               {1,     1,    do_bootchart}},
         {"chmod",                   {2,     2,    do_chmod}},
         {"chown",                   {2,     3,    do_chown}},
         {"class_reset",             {1,     1,    do_class_reset}},

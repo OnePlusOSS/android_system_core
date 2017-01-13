@@ -148,13 +148,10 @@ socket <name> <type> <perm> [ <user> [ <group> [ <seclabel> ] ] ]
   seclabel or computed based on the service executable file security context.
   For native executables see libcutils android_get_control_socket().
 
-file <path> <type> <perm> [ <user> [ <group> [ <seclabel> ] ] ]
-  Open/Create a file path and pass its fd to the launched process.  <type> must
-  be "r", "w" or "rw".  User and group default to 0.  'seclabel' is the SELinux
-  security context for the file if it must be created.  It defaults to the
-  service security context, as specified by seclabel or computed based on the
-  service executable file security context.  For native executables see
-  libcutils android_get_control_file().
+file <path> <type>
+  Open a file path and pass its fd to the launched process.  <type> must be
+  "r", "w" or "rw".  For native executables see libcutils
+  android_get_control_file().
 
 user <username>
   Change to 'username' before exec'ing this service.
@@ -256,9 +253,10 @@ at three times,
 Commands
 --------
 
-bootchart_init
-   Start bootcharting if configured (see below).
-   This is included in the default init.rc.
+bootchart [start|stop]
+   Start/stop bootcharting. These are present in the default init.rc files,
+   but bootcharting is only active if the file /data/bootchart/enabled exists;
+   otherwise bootchart start/stop are no-ops.
 
 chmod <octal-mode> <path>
    Change file access permissions.
@@ -443,16 +441,27 @@ Properties
 Init provides information about the services that it is responsible
 for via the below properties.
 
-init.start
-  Time after boot in ns (via the CLOCK_BOOTTIME clock) at which the first
-  stage of init started.
-
 init.svc.<name>
   State of a named service ("stopped", "stopping", "running", "restarting")
 
-init.svc.<name>.start
+
+Boot timing
+-----------
+Init records some boot timing information in system properties.
+
+ro.boottime.init
+  Time after boot in ns (via the CLOCK_BOOTTIME clock) at which the first
+  stage of init started.
+
+ro.boottime.init.selinux
+  How long it took the first stage to initialize SELinux.
+
+ro.boottime.init.cold_boot_wait
+  How long init waited for ueventd's coldboot phase to end.
+
+ro.boottime.<service-name>
   Time after boot in ns (via the CLOCK_BOOTTIME clock) that the service was
-  most recently started.
+  first started.
 
 
 Bootcharting
@@ -463,19 +472,11 @@ files that can be later processed by the tools provided by www.bootchart.org.
 On the emulator, use the -bootchart <timeout> option to boot with bootcharting
 activated for <timeout> seconds.
 
-On a device, create /data/bootchart/start with a command like the following:
+On a device:
 
-  adb shell 'echo $TIMEOUT > /data/bootchart/start'
+  adb shell 'touch /data/bootchart/enabled'
 
-Where the value of $TIMEOUT corresponds to the desired bootcharted period in
-seconds. Bootcharting will stop after that many seconds have elapsed.
-You can also stop the bootcharting at any moment by doing the following:
-
-  adb shell 'echo 1 > /data/bootchart/stop'
-
-Note that /data/bootchart/stop is deleted automatically by init at the end of
-the bootcharting. This is not the case with /data/bootchart/start, so don't
-forget to delete it when you're done collecting data.
+Don't forget to delete this file when you're done collecting data!
 
 The log files are written to /data/bootchart/. A script is provided to
 retrieve them and create a bootchart.tgz file that can be used with the

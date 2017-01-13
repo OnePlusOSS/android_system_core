@@ -41,6 +41,8 @@
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
+
+#include <cutils/android_reboot.h>
 /* for ANDROID_SOCKET_* */
 #include <cutils/sockets.h>
 
@@ -158,69 +160,6 @@ out_unlink:
     return -1;
 }
 
-/*
- * create_file - opens and creates a file as dictated in init.rc.
- * This file is inherited by the daemon. We communicate the file
- * descriptor's value via the environment variable ANDROID_FILE_<basename>
- */
-int create_file(const char *path, int flags, mode_t perm, uid_t uid,
-                  gid_t gid, const char *filecon)
-{
-    char *secontext = NULL;
-
-    if (filecon) {
-        if (setsockcreatecon(filecon) == -1) {
-            PLOG(ERROR) << "setsockcreatecon(\"" << filecon << "\") failed";
-            return -1;
-        }
-    } else if (sehandle) {
-        if (selabel_lookup(sehandle, &secontext, path, perm) != -1) {
-            if (setfscreatecon(secontext) == -1) {
-                freecon(secontext); // does not upset errno value
-                PLOG(ERROR) << "setfscreatecon(\"" << secontext << "\") failed";
-                return -1;
-            }
-        }
-    }
-
-    android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(path, flags | O_NDELAY, perm)));
-    int savederrno = errno;
-
-    if (filecon) {
-        setsockcreatecon(NULL);
-        lsetfilecon(path, filecon);
-    } else {
-        setfscreatecon(NULL);
-        freecon(secontext);
-    }
-
-    if (fd < 0) {
-        errno = savederrno;
-        PLOG(ERROR) << "Failed to open/create file '" << path << "'";
-        return -1;
-    }
-
-    if (!(flags & O_NDELAY)) fcntl(fd, F_SETFD, flags);
-
-    if (lchown(path, uid, gid)) {
-        PLOG(ERROR) << "Failed to lchown file '" << path << "'";
-        return -1;
-    }
-    if (perm != static_cast<mode_t>(-1)) {
-        if (fchmodat(AT_FDCWD, path, perm, AT_SYMLINK_NOFOLLOW)) {
-            PLOG(ERROR) << "Failed to fchmodat file '" << path << "'";
-            return -1;
-        }
-    }
-
-    LOG(INFO) << "Created file '" << path << "'"
-              << ", mode " << std::oct << perm << std::dec
-              << ", user " << uid
-              << ", group " << gid;
-
-    return fd.release();
-}
-
 bool read_file(const char* path, std::string* content) {
     content->clear();
 
@@ -246,18 +185,18 @@ bool read_file(const char* path, std::string* content) {
     return okay;
 }
 
-int write_file(const char* path, const char* content) {
+bool write_file(const char* path, const char* content) {
     int fd = TEMP_FAILURE_RETRY(open(path, O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC, 0600));
     if (fd == -1) {
         PLOG(ERROR) << "write_file: Unable to open '" << path << "'";
-        return -1;
+        return false;
     }
-    int result = android::base::WriteStringToFd(content, fd) ? 0 : -1;
-    if (result == -1) {
+    bool success = android::base::WriteStringToFd(content, fd);
+    if (!success) {
         PLOG(ERROR) << "write_file: Unable to write to '" << path << "'";
     }
     close(fd);
-    return result;
+    return success;
 }
 
 boot_clock::time_point boot_clock::now() {
@@ -471,4 +410,23 @@ bool expand_props(const std::string& src, std::string* dst) {
     }
 
     return true;
+}
+
+void reboot(const char* destination) {
+    android_reboot(ANDROID_RB_RESTART2, 0, destination);
+    // We're init, so android_reboot will actually have been a syscall so there's nothing
+    // to wait for. If android_reboot returns, just abort so that the kernel will reboot
+    // itself when init dies.
+    PLOG(FATAL) << "reboot failed";
+    abort();
+}
+
+void panic() {
+    LOG(ERROR) << "panic: rebooting to bootloader";
+    reboot("bootloader");
+}
+
+std::ostream& operator<<(std::ostream& os, const Timer& t) {
+    os << t.duration_s() << " seconds";
+    return os;
 }

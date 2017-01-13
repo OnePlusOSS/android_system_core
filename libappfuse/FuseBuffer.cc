@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <type_traits>
 
+#include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/macros.h>
 
@@ -34,44 +35,65 @@ static_assert(
     "FuseBuffer must be standard layout union.");
 
 template <typename T>
-bool FuseMessage<T>::CheckHeaderLength() const {
+bool FuseMessage<T>::CheckHeaderLength(const char* name) const {
   const auto& header = static_cast<const T*>(this)->header;
-  if (sizeof(header) <= header.len && header.len <= sizeof(T)) {
+  if (header.len >= sizeof(header) && header.len <= sizeof(T)) {
     return true;
   } else {
-    LOG(ERROR) << "Packet size is invalid=" << header.len;
-    return false;
-  }
-}
-
-template <typename T>
-bool FuseMessage<T>::CheckResult(
-    int result, const char* operation_name) const {
-  const auto& header = static_cast<const T*>(this)->header;
-  if (result >= 0 && static_cast<uint32_t>(result) == header.len) {
-    return true;
-  } else {
-    PLOG(ERROR) << "Failed to " << operation_name
-        << " a packet. result=" << result << " header.len="
-        << header.len;
+    LOG(ERROR) << "Invalid header length is found in " << name << ": " <<
+        header.len;
     return false;
   }
 }
 
 template <typename T>
 bool FuseMessage<T>::Read(int fd) {
-  const ssize_t result = TEMP_FAILURE_RETRY(::read(fd, this, sizeof(T)));
-  return CheckHeaderLength() && CheckResult(result, "read");
+  char* const buf = reinterpret_cast<char*>(this);
+  const ssize_t result = TEMP_FAILURE_RETRY(::read(fd, buf, sizeof(T)));
+  if (result < 0) {
+    PLOG(ERROR) << "Failed to read a FUSE message";
+    return false;
+  }
+
+  const auto& header = static_cast<const T*>(this)->header;
+  if (result < static_cast<ssize_t>(sizeof(header))) {
+    LOG(ERROR) << "Read bytes " << result << " are shorter than header size " <<
+        sizeof(header);
+    return false;
+  }
+
+  if (!CheckHeaderLength("Read")) {
+    return false;
+  }
+
+  if (static_cast<uint32_t>(result) > header.len) {
+    LOG(ERROR) << "Read bytes " << result << " are longer than header.len " <<
+        header.len;
+    return false;
+  }
+
+  if (!base::ReadFully(fd, buf + result, header.len - result)) {
+    PLOG(ERROR) << "ReadFully failed";
+    return false;
+  }
+
+  return true;
 }
 
 template <typename T>
 bool FuseMessage<T>::Write(int fd) const {
-  const auto& header = static_cast<const T*>(this)->header;
-  if (!CheckHeaderLength()) {
+  if (!CheckHeaderLength("Write")) {
     return false;
   }
-  const ssize_t result = TEMP_FAILURE_RETRY(::write(fd, this, header.len));
-  return CheckResult(result, "write");
+
+  const char* const buf = reinterpret_cast<const char*>(this);
+  const auto& header = static_cast<const T*>(this)->header;
+  if (!base::WriteFully(fd, buf, header.len)) {
+    PLOG(ERROR) << "WriteFully failed";
+    return false;
+  }
+
+  return true;
 }
 
 template class FuseMessage<FuseRequest>;

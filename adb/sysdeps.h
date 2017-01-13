@@ -34,6 +34,7 @@
 #include <android-base/unique_fd.h>
 #include <android-base/utf8.h>
 
+#include "sysdeps/errno.h"
 #include "sysdeps/stat.h"
 
 /*
@@ -179,8 +180,6 @@ static __inline__ void  close_on_exec(int  fd)
 {
     /* nothing really */
 }
-
-#define  S_ISLNK(m)   0   /* no symlinks on Win32 */
 
 extern int  adb_unlink(const char*  path);
 #undef  unlink
@@ -362,9 +361,6 @@ inline void seekdir(DIR*, long) {
 #define unsetenv unsetenv_utf8_not_yet_implemented
 
 #define getcwd adb_getcwd
-
-char* adb_strerror(int err);
-#define strerror adb_strerror
 
 // Helper class to convert UTF-16 argv from wmain() to UTF-8 args that can be
 // passed to main().

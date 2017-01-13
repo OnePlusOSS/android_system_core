@@ -21,16 +21,17 @@ liblog_sources = [
     "config_write.c",
     "logger_name.c",
     "logger_lock.c",
+    "log_ratelimit.cpp",
 ]
 liblog_host_sources = [
     "fake_log_device.c",
     "fake_writer.c",
 ]
 liblog_target_sources = [
-    "event_tag_map.c",
+    "event_tag_map.cpp",
     "config_read.c",
     "log_time.cpp",
-    "log_is_loggable.c",
+    "properties.c",
     "logprint.c",
     "pmsg_reader.c",
     "pmsg_writer.c",
@@ -68,10 +69,13 @@ cc_library {
             enabled: true,
         },
         not_windows: {
-            srcs: ["event_tag_map.c"],
+            srcs: ["event_tag_map.cpp"],
         },
         linux: {
             host_ldlibs: ["-lrt"],
+        },
+        linux_bionic: {
+            enabled: true,
         },
     },
 
@@ -111,4 +115,5 @@ ndk_library {
     name: "liblog.ndk",
     symbol_file: "liblog.map.txt",
     first_version: "9",
+    unversioned_until: "current",
 }

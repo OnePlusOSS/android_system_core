@@ -311,7 +311,7 @@ const char *android::tagToName(size_t *len, uint32_t tag) {
     if (!map) {
         sem_wait(&sem_name);
         if (!map) {
-            map = android_openEventTagMap(EVENT_TAG_MAP_FILE);
+            map = android_openEventTagMap(NULL);
         }
         sem_post(&sem_name);
         if (!map) {
@@ -451,9 +451,8 @@ int main(int argc, char *argv[]) {
         pthread_attr_destroy(&attr);
     }
 
-    bool auditd = __android_logger_property_get_bool("logd.auditd",
-                                                     BOOL_DEFAULT_TRUE |
-                                                     BOOL_DEFAULT_FLAG_PERSIST);
+    bool auditd = __android_logger_property_get_bool("ro.logd.auditd",
+                                                     BOOL_DEFAULT_TRUE);
     if (drop_privs(klogd, auditd) != 0) {
         return -1;
     }
@@ -513,8 +512,8 @@ int main(int argc, char *argv[]) {
     if (auditd) {
         al = new LogAudit(logBuf, reader,
                           __android_logger_property_get_bool(
-                              "logd.auditd.dmesg",
-                              BOOL_DEFAULT_TRUE | BOOL_DEFAULT_FLAG_PERSIST)
+                              "ro.logd.auditd.dmesg",
+                              BOOL_DEFAULT_TRUE)
                                   ? fdDmesg
                                   : -1);
     }

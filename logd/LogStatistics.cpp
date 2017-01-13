@@ -27,6 +27,8 @@
 
 #include "LogStatistics.h"
 
+size_t LogStatistics::SizesTotal;
+
 LogStatistics::LogStatistics() : enable(false) {
     log_id_for_each(id) {
         mSizes[id] = 0;
@@ -38,6 +40,8 @@ LogStatistics::LogStatistics() : enable(false) {
 }
 
 namespace android {
+
+size_t sizesTotal() { return LogStatistics::sizesTotal(); }
 
 // caller must own and free character string
 char *pidToName(pid_t pid) {
@@ -53,7 +57,7 @@ char *pidToName(pid_t pid) {
             if (ret > 0) {
                 buffer[sizeof(buffer)-1] = '\0';
                 // frameworks intermediate state
-                if (fast<strcmp>(buffer, "<pre-initialized>")) {
+                if (fastcmp<strcmp>(buffer, "<pre-initialized>")) {
                     retval = strdup(buffer);
                 }
             }
@@ -71,8 +75,18 @@ void LogStatistics::add(LogBufferElement *element) {
     mSizes[log_id] += size;
     ++mElements[log_id];
 
-    mSizesTotal[log_id] += size;
-    ++mElementsTotal[log_id];
+    if (element->getDropped()) {
+        ++mDroppedElements[log_id];
+    } else {
+        // When caller adding a chatty entry, they will have already
+        // called add() and subtract() for each entry as they are
+        // evaluated and trimmed, thus recording size and number of
+        // elements, but we must recognize the manufactured dropped
+        // entry as not contributing to the lifetime totals.
+        mSizesTotal[log_id] += size;
+        SizesTotal += size;
+        ++mElementsTotal[log_id];
+    }
 
     if (log_id == LOG_ID_KERNEL) {
         return;
@@ -182,7 +196,7 @@ const char *LogStatistics::uidToName(uid_t uid) const {
     }
 
     // Parse /data/system/packages.list
-    uid_t userId = uid % AID_USER;
+    uid_t userId = uid % AID_USER_OFFSET;
     const char *name = android::uidToName(userId);
     if (!name && (userId > (AID_SHARED_GID_START - AID_APP))) {
         name = android::uidToName(userId - (AID_SHARED_GID_START - AID_APP));
@@ -209,7 +223,7 @@ const char *LogStatistics::uidToName(uid_t uid) const {
             if (nameTmp) {
                 if (!name) {
                     name = strdup(nameTmp);
-                } else if (fast<strcmp>(name, nameTmp)) {
+                } else if (fastcmp<strcmp>(name, nameTmp)) {
                     free(const_cast<char *>(name));
                     name = NULL;
                     break;
@@ -295,7 +309,7 @@ std::string UidEntry::format(const LogStatistics &stat, log_id_t id) const {
             if ((spaces <= 0) && pruned.length()) {
                 spaces = 1;
             }
-            if ((spaces > 0) && (pruned.length() != 0)) {
+            if (spaces > 0) {
                 change += android::base::StringPrintf("%*s", (int)spaces, "");
             }
             pruned = change + pruned;

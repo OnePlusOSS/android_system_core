@@ -43,7 +43,6 @@
 #include <android-base/file.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
-#include <cutils/android_reboot.h>
 #include <cutils/fs.h>
 #include <cutils/iosched_policy.h>
 #include <cutils/list.h>
@@ -164,14 +163,21 @@ static int wait_for_coldboot_done_action(const std::vector<std::string>& args) {
     Timer t;
 
     LOG(VERBOSE) << "Waiting for " COLDBOOT_DONE "...";
-    // Any longer than 1s is an unreasonable length of time to delay booting.
-    // If you're hitting this timeout, check that you didn't make your
-    // sepolicy regular expressions too expensive (http://b/19899875).
-    if (wait_for_file(COLDBOOT_DONE, 1s)) {
+
+    // Historically we had a 1s timeout here because we weren't otherwise
+    // tracking boot time, and many OEMs made their sepolicy regular
+    // expressions too expensive (http://b/19899875).
+
+    // Now we're tracking boot time, just log the time taken to a system
+    // property. We still panic if it takes more than a minute though,
+    // because any build that slow isn't likely to boot at all, and we'd
+    // rather any test lab devices fail back to the bootloader.
+    if (wait_for_file(COLDBOOT_DONE, 60s) < 0) {
         LOG(ERROR) << "Timed out waiting for " COLDBOOT_DONE;
+        panic();
     }
 
-    LOG(VERBOSE) << "Waiting for " COLDBOOT_DONE " took " << t.duration() << "s.";
+    property_set("ro.boottime.init.cold_boot_wait", std::to_string(t.duration_ns()).c_str());
     return 0;
 }
 
@@ -252,9 +258,8 @@ ret:
 }
 
 static void security_failure() {
-    LOG(ERROR) << "Security failure; rebooting into recovery mode...";
-    android_reboot(ANDROID_RB_RESTART2, 0, "recovery");
-    while (true) { pause(); }  // never reached
+    LOG(ERROR) << "Security failure...";
+    panic();
 }
 
 #define MMAP_RND_PATH "/proc/sys/vm/mmap_rnd_bits"
@@ -344,13 +349,9 @@ static int set_mmap_rnd_bits_action(const std::vector<std::string>& args)
     // TODO: add mips support b/27788820
     ret = 0;
 #else
-    ERROR("Unknown architecture\n");
+    LOG(ERROR) << "Unknown architecture";
 #endif
 
-#ifdef __BRILLO__
-    // TODO: b/27794137
-    ret = 0;
-#endif
     if (ret == -1) {
         LOG(ERROR) << "Unable to set adequate mmap entropy value!";
         security_failure();
@@ -459,11 +460,17 @@ static void process_kernel_cmdline() {
     if (qemu[0]) import_kernel_cmdline(true, import_kernel_nv);
 }
 
+static int property_enable_triggers_action(const std::vector<std::string>& args)
+{
+    /* Enable property triggers. */
+    property_triggers_enabled = 1;
+    return 0;
+}
+
 static int queue_property_triggers_action(const std::vector<std::string>& args)
 {
+    ActionManager::GetInstance().QueueBuiltinAction(property_enable_triggers_action, "enable_property_trigger");
     ActionManager::GetInstance().QueueAllPropertyTriggers();
-    /* enable property triggers */
-    property_triggers_enabled = 1;
     return 0;
 }
 
@@ -535,12 +542,12 @@ static void selinux_initialize(bool in_kernel_domain) {
             }
         }
 
-        if (write_file("/sys/fs/selinux/checkreqprot", "0") == -1) {
+        if (!write_file("/sys/fs/selinux/checkreqprot", "0")) {
             security_failure();
         }
 
-        LOG(INFO) << "(Initializing SELinux " << (is_enforcing ? "enforcing" : "non-enforcing")
-                  << " took " << t.duration() << "s.)";
+        // init's first stage can't set properties, so pass the time to the second stage.
+        setenv("INIT_SELINUX_TOOK", std::to_string(t.duration_ns()).c_str(), 1);
     } else {
         selinux_init_all_handles();
     }
@@ -746,7 +753,13 @@ int main(int argc, char** argv) {
         export_kernel_boot_props();
 
         // Make the time that init started available for bootstat to log.
-        property_set("init.start", getenv("INIT_STARTED_AT"));
+        property_set("ro.boottime.init", getenv("INIT_STARTED_AT"));
+        property_set("ro.boottime.init.selinux", getenv("INIT_SELINUX_TOOK"));
+
+        // Clean up our environment.
+        unsetenv("INIT_SECOND_STAGE");
+        unsetenv("INIT_STARTED_AT");
+        unsetenv("INIT_SELINUX_TOOK");
 
         // Now set up SELinux for second stage.
         selinux_initialize(false);
@@ -828,16 +841,14 @@ int main(int argc, char** argv) {
         // By default, sleep until something happens.
         int epoll_timeout_ms = -1;
 
-        // If there's more work to do, wake up again immediately.
-        if (am.HasMoreCommands()) epoll_timeout_ms = 0;
-
         // If there's a process that needs restarting, wake up in time for that.
         if (process_needs_restart_at != 0) {
             epoll_timeout_ms = (process_needs_restart_at - time(nullptr)) * 1000;
             if (epoll_timeout_ms < 0) epoll_timeout_ms = 0;
         }
 
-        bootchart_sample(&epoll_timeout_ms);
+        // If there's more work to do, wake up again immediately.
+        if (am.HasMoreCommands()) epoll_timeout_ms = 0;
 
         epoll_event ev;
         int nr = TEMP_FAILURE_RETRY(epoll_wait(epoll_fd, &ev, 1, epoll_timeout_ms));

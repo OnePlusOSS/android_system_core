@@ -36,7 +36,6 @@
 #include <android-base/parseint.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
-#include <cutils/android_reboot.h>
 #include <system/thread_defs.h>
 
 #include <processgroup/processgroup.h>
@@ -190,9 +189,9 @@ void Service::NotifyStateChange(const std::string& new_state) const {
     property_set(prop_name.c_str(), new_state.c_str());
 
     if (new_state == "running") {
-        prop_name += ".start";
         uint64_t start_ns = time_started_.time_since_epoch().count();
-        property_set(prop_name.c_str(), StringPrintf("%" PRIu64, start_ns).c_str());
+        property_set(StringPrintf("ro.boottime.%s", name_.c_str()).c_str(),
+                     StringPrintf("%" PRIu64, start_ns).c_str());
     }
 }
 
@@ -283,10 +282,8 @@ bool Service::Reap() {
     if ((flags_ & SVC_CRITICAL) && !(flags_ & SVC_RESTART)) {
         if (now < time_crashed_ + 4min) {
             if (++crash_count_ > 4) {
-                LOG(ERROR) << "critical process '" << name_ << "' exited 4 times in 4 minutes; "
-                           << "rebooting into recovery mode";
-                android_reboot(ANDROID_RB_RESTART2, 0, "recovery");
-                return false;
+                LOG(ERROR) << "critical process '" << name_ << "' exited 4 times in 4 minutes";
+                panic();
             }
         } else {
             time_crashed_ = now;
@@ -315,11 +312,26 @@ void Service::DumpState() const {
 bool Service::ParseCapabilities(const std::vector<std::string>& args, std::string* err) {
     capabilities_ = 0;
 
+    if (!CapAmbientSupported()) {
+        *err = "capabilities requested but the kernel does not support ambient capabilities";
+        return false;
+    }
+
+    unsigned int last_valid_cap = GetLastValidCap();
+    if (last_valid_cap >= capabilities_.size()) {
+        LOG(WARNING) << "last valid run-time capability is larger than CAP_LAST_CAP";
+    }
+
     for (size_t i = 1; i < args.size(); i++) {
         const std::string& arg = args[i];
-        int cap = LookupCap(arg);
-        if (cap == -1) {
+        int res = LookupCap(arg);
+        if (res < 0) {
             *err = StringPrintf("invalid capability '%s'", arg.c_str());
+            return false;
+        }
+        unsigned int cap = static_cast<unsigned int>(res);  // |res| is >= 0.
+        if (cap > last_valid_cap) {
+            *err = StringPrintf("capability '%s' not supported by the kernel", arg.c_str());
             return false;
         }
         capabilities_[cap] = true;
@@ -529,7 +541,7 @@ Service::OptionParserMap::Map& Service::OptionParserMap::map() const {
         {"seclabel",    {1,     1,    &Service::ParseSeclabel}},
         {"setenv",      {2,     2,    &Service::ParseSetenv}},
         {"socket",      {3,     6,    &Service::ParseSocket}},
-        {"file",        {2,     6,    &Service::ParseFile}},
+        {"file",        {2,     2,    &Service::ParseFile}},
         {"user",        {1,     1,    &Service::ParseUser}},
         {"writepid",    {1,     kMax, &Service::ParseWritepid}},
     };
@@ -570,12 +582,15 @@ bool Service::Start() {
             console_ = default_console;
         }
 
-        bool have_console = (open(console_.c_str(), O_RDWR | O_CLOEXEC) != -1);
-        if (!have_console) {
+        // Make sure that open call succeeds to ensure a console driver is
+        // properly registered for the device node
+        int console_fd = open(console_.c_str(), O_RDWR | O_CLOEXEC);
+        if (console_fd < 0) {
             PLOG(ERROR) << "service '" << name_ << "' couldn't open console '" << console_ << "'";
             flags_ |= SVC_DISABLED;
             return false;
         }
+        close(console_fd);
     }
 
     struct stat sb;

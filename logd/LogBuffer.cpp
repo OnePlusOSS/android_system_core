@@ -17,6 +17,7 @@
 //#define DEBUG_CHECK_FOR_STALE_ENTRIES
 
 #include <ctype.h>
+#include <endian.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -33,6 +34,7 @@
 #include "LogBuffer.h"
 #include "LogKlog.h"
 #include "LogReader.h"
+#include "LogUtils.h"
 
 #ifndef __predict_false
 #define __predict_false(exp) __builtin_expect((exp) != 0, 0)
@@ -110,7 +112,79 @@ LogBuffer::LogBuffer(LastLogTimes *times):
         mTimes(*times) {
     pthread_mutex_init(&mLogElementsLock, NULL);
 
+    log_id_for_each(i) {
+        lastLoggedElements[i] = NULL;
+        droppedElements[i] = NULL;
+    }
+
     init();
+}
+
+LogBuffer::~LogBuffer() {
+    log_id_for_each(i) {
+        delete lastLoggedElements[i];
+        delete droppedElements[i];
+    }
+}
+
+enum match_type {
+    DIFFERENT,
+    SAME,
+    SAME_LIBLOG
+};
+
+static enum match_type identical(LogBufferElement* elem, LogBufferElement* last) {
+    // is it mostly identical?
+//  if (!elem) return DIFFERENT;
+    unsigned short lenl = elem->getMsgLen();
+    if (!lenl) return DIFFERENT;
+//  if (!last) return DIFFERENT;
+    unsigned short lenr = last->getMsgLen();
+    if (!lenr) return DIFFERENT;
+//  if (elem->getLogId() != last->getLogId()) return DIFFERENT;
+    if (elem->getUid() != last->getUid()) return DIFFERENT;
+    if (elem->getPid() != last->getPid()) return DIFFERENT;
+    if (elem->getTid() != last->getTid()) return DIFFERENT;
+
+    // last is more than a minute old, stop squashing identical messages
+    if (elem->getRealTime().nsec() >
+        (last->getRealTime().nsec() + 60 * NS_PER_SEC)) return DIFFERENT;
+
+    // Identical message
+    const char* msgl = elem->getMsg();
+    const char* msgr = last->getMsg();
+    if (lenl == lenr) {
+        if (!fastcmp<memcmp>(msgl, msgr, lenl)) return SAME;
+        // liblog tagged messages (content gets summed)
+        if ((elem->getLogId() == LOG_ID_EVENTS) &&
+            (lenl == sizeof(android_log_event_int_t)) &&
+            !fastcmp<memcmp>(msgl, msgr,
+                             sizeof(android_log_event_int_t) - sizeof(int32_t)) &&
+            (elem->getTag() == LIBLOG_LOG_TAG)) return SAME_LIBLOG;
+    }
+
+    // audit message (except sequence number) identical?
+    static const char avc[] = "): avc: ";
+
+    if (last->isBinary()) {
+        if (fastcmp<memcmp>(msgl, msgr,
+                            sizeof(android_log_event_string_t) -
+                                sizeof(int32_t))) return DIFFERENT;
+        msgl += sizeof(android_log_event_string_t);
+        lenl -= sizeof(android_log_event_string_t);
+        msgr += sizeof(android_log_event_string_t);
+        lenr -= sizeof(android_log_event_string_t);
+    }
+    const char *avcl = android::strnstr(msgl, lenl, avc);
+    if (!avcl) return DIFFERENT;
+    lenl -= avcl - msgl;
+    const char *avcr = android::strnstr(msgr, lenr, avc);
+    if (!avcr) return DIFFERENT;
+    lenr -= avcr - msgr;
+    if (lenl != lenr) return DIFFERENT;
+    if (fastcmp<memcmp>(avcl + strlen(avc),
+                        avcr + strlen(avc), lenl)) return DIFFERENT;
+    return SAME;
 }
 
 int LogBuffer::log(log_id_t log_id, log_time realtime,
@@ -145,14 +219,164 @@ int LogBuffer::log(log_id_t log_id, log_time realtime,
     }
 
     pthread_mutex_lock(&mLogElementsLock);
+    LogBufferElement* currentLast = lastLoggedElements[log_id];
+    if (currentLast) {
+        LogBufferElement *dropped = droppedElements[log_id];
+        unsigned short count = dropped ? dropped->getDropped() : 0;
+        //
+        // State Init
+        //     incoming:
+        //         dropped = NULL
+        //         currentLast = NULL;
+        //         elem = incoming message
+        //     outgoing:
+        //         dropped = NULL -> State 0
+        //         currentLast = copy of elem
+        //         log elem
+        // State 0
+        //     incoming:
+        //         count = 0
+        //         dropped = NULL
+        //         currentLast = copy of last message
+        //         elem = incoming message
+        //     outgoing: if match != DIFFERENT
+        //         dropped = copy of first identical message -> State 1
+        //         currentLast = reference to elem
+        //     break: if match == DIFFERENT
+        //         dropped = NULL -> State 0
+        //         delete copy of last message (incoming currentLast)
+        //         currentLast = copy of elem
+        //         log elem
+        // State 1
+        //     incoming:
+        //         count = 0
+        //         dropped = copy of first identical message
+        //         currentLast = reference to last held-back incoming
+        //                       message
+        //         elem = incoming message
+        //     outgoing: if match == SAME
+        //         delete copy of first identical message (dropped)
+        //         dropped = reference to last held-back incoming
+        //                   message set to chatty count of 1 -> State 2
+        //         currentLast = reference to elem
+        //     outgoing: if match == SAME_LIBLOG
+        //         dropped = copy of first identical message -> State 1
+        //         take sum of currentLast and elem
+        //         if sum overflows:
+        //             log currentLast
+        //             currentLast = reference to elem
+        //         else
+        //             delete currentLast
+        //             currentLast = reference to elem, sum liblog.
+        //     break: if match == DIFFERENT
+        //         delete dropped
+        //         dropped = NULL -> State 0
+        //         log reference to last held-back (currentLast)
+        //         currentLast = copy of elem
+        //         log elem
+        // State 2
+        //     incoming:
+        //         count = chatty count
+        //         dropped = chatty message holding count
+        //         currentLast = reference to last held-back incoming
+        //                       message.
+        //         dropped = chatty message holding count
+        //         elem = incoming message
+        //     outgoing: if match != DIFFERENT
+        //         delete chatty message holding count
+        //         dropped = reference to last held-back incoming
+        //                   message, set to chatty count + 1
+        //         currentLast = reference to elem
+        //     break: if match == DIFFERENT
+        //         log dropped (chatty message)
+        //         dropped = NULL -> State 0
+        //         log reference to last held-back (currentLast)
+        //         currentLast = copy of elem
+        //         log elem
+        //
+        enum match_type match = identical(elem, currentLast);
+        if (match != DIFFERENT) {
+            if (dropped) {
+                // Sum up liblog tag messages?
+                if ((count == 0) /* at Pass 1 */ && (match == SAME_LIBLOG)) {
+                    android_log_event_int_t* event =
+                        reinterpret_cast<android_log_event_int_t*>(
+                            const_cast<char*>(currentLast->getMsg()));
+                    //
+                    // To unit test, differentiate with something like:
+                    //    event->header.tag = htole32(CHATTY_LOG_TAG);
+                    // here, then instead of delete currentLast below,
+                    // log(currentLast) to see the incremental sums form.
+                    //
+                    uint32_t swab = event->payload.data;
+                    unsigned long long total = htole32(swab);
+                    event = reinterpret_cast<android_log_event_int_t*>(
+                            const_cast<char*>(elem->getMsg()));
+                    swab = event->payload.data;
 
+                    lastLoggedElements[LOG_ID_EVENTS] = elem;
+                    total += htole32(swab);
+                    // check for overflow
+                    if (total >= UINT32_MAX) {
+                        log(currentLast);
+                        pthread_mutex_unlock(&mLogElementsLock);
+                        return len;
+                    }
+                    stats.add(currentLast);
+                    stats.subtract(currentLast);
+                    delete currentLast;
+                    swab = total;
+                    event->payload.data = htole32(swab);
+                    pthread_mutex_unlock(&mLogElementsLock);
+                    return len;
+                }
+                if (count == USHRT_MAX) {
+                    log(dropped);
+                    count = 1;
+                } else {
+                    delete dropped;
+                    ++count;
+                }
+            }
+            if (count) {
+                stats.add(currentLast);
+                stats.subtract(currentLast);
+                currentLast->setDropped(count);
+            }
+            droppedElements[log_id] = currentLast;
+            lastLoggedElements[log_id] = elem;
+            pthread_mutex_unlock(&mLogElementsLock);
+            return len;
+        }
+        if (dropped) { // State 1 or 2
+            if (count) { // State 2
+               log(dropped); // report chatty
+            } else { // State 1
+               delete dropped;
+            }
+            droppedElements[log_id] = NULL;
+            log(currentLast); // report last message in the series
+        } else { // State 0
+            delete currentLast;
+        }
+    }
+    lastLoggedElements[log_id] = new LogBufferElement(*elem);
+
+    log(elem);
+    pthread_mutex_unlock(&mLogElementsLock);
+
+    return len;
+}
+
+// assumes mLogElementsLock held, owns elem, will look after garbage collection
+void LogBuffer::log(LogBufferElement* elem) {
     // Insert elements in time sorted order if possible
     //  NB: if end is region locked, place element at end of list
     LogBufferElementCollection::iterator it = mLogElements.end();
     LogBufferElementCollection::iterator last = it;
     while (last != mLogElements.begin()) {
         --it;
-        if ((*it)->getRealTime() <= realtime) {
+        if ((*it)->getRealTime() <= elem->getRealTime()) {
             break;
         }
         last = it;
@@ -169,7 +393,7 @@ int LogBuffer::log(log_id_t log_id, log_time realtime,
 
         LastLogTimes::iterator times = mTimes.begin();
         while(times != mTimes.end()) {
-            LogTimeEntry *entry = (*times);
+            LogTimeEntry* entry = (*times);
             if (entry->owned_Locked()) {
                 if (!entry->mNonBlock) {
                     end_always = true;
@@ -187,17 +411,14 @@ int LogBuffer::log(log_id_t log_id, log_time realtime,
                 || (end_set && (end >= (*last)->getSequence()))) {
             mLogElements.push_back(elem);
         } else {
-            mLogElements.insert(last,elem);
+            mLogElements.insert(last, elem);
         }
 
         LogTimeEntry::unlock();
     }
 
     stats.add(elem);
-    maybePrune(log_id);
-    pthread_mutex_unlock(&mLogElementsLock);
-
-    return len;
+    maybePrune(elem->getLogId());
 }
 
 // Prune at most 10% of the log entries or maxPrune, whichever is less.
@@ -313,10 +534,9 @@ LogBufferElementCollection::iterator LogBuffer::erase(
 class LogBufferElementKey {
     const union {
         struct {
-            uint16_t uid;
+            uint32_t uid;
             uint16_t pid;
             uint16_t tid;
-            uint16_t padding;
         } __packed;
         uint64_t value;
     } __packed;
@@ -325,8 +545,8 @@ public:
     LogBufferElementKey(uid_t uid, pid_t pid, pid_t tid):
             uid(uid),
             pid(pid),
-            tid(tid),
-            padding(0) {
+            tid(tid)
+    {
     }
     explicit LogBufferElementKey(uint64_t key):value(key) { }
 

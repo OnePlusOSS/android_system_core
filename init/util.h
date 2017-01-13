@@ -21,8 +21,9 @@
 #include <sys/types.h>
 
 #include <chrono>
-#include <string>
 #include <functional>
+#include <ostream>
+#include <string>
 
 #define COLDBOOT_DONE "/dev/.coldboot_done"
 
@@ -30,11 +31,9 @@ using namespace std::chrono_literals;
 
 int create_socket(const char *name, int type, mode_t perm,
                   uid_t uid, gid_t gid, const char *socketcon);
-int create_file(const char *path, int mode, mode_t perm,
-                uid_t uid, gid_t gid, const char *filecon);
 
 bool read_file(const char* path, std::string* content);
-int write_file(const char* path, const char* content);
+bool write_file(const char* path, const char* content);
 
 // A std::chrono clock based on CLOCK_BOOTTIME.
 class boot_clock {
@@ -51,14 +50,20 @@ class Timer {
   Timer() : start_(boot_clock::now()) {
   }
 
-  double duration() {
+  double duration_s() const {
     typedef std::chrono::duration<double> double_duration;
     return std::chrono::duration_cast<double_duration>(boot_clock::now() - start_).count();
+  }
+
+  int64_t duration_ns() const {
+    return (boot_clock::now() - start_).count();
   }
 
  private:
   boot_clock::time_point start_;
 };
+
+std::ostream& operator<<(std::ostream& os, const Timer& t);
 
 unsigned int decode_uid(const char *s);
 
@@ -72,4 +77,8 @@ int restorecon(const char *pathname, int flags = 0);
 std::string bytes_to_hex(const uint8_t *bytes, size_t bytes_len);
 bool is_dir(const char* pathname);
 bool expand_props(const std::string& src, std::string* dst);
+
+void reboot(const char* destination) __attribute__((__noreturn__));
+void panic() __attribute__((__noreturn__));
+
 #endif

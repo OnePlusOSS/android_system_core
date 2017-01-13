@@ -22,27 +22,13 @@ cc_defaults {
         "-Werror",
     ],
 
+    // The latest clang (r230699) does not allow SP/PC to be declared in inline asm lists.
     clang_cflags: ["-Wno-inline-asm"],
 
-    // The latest clang (r230699) does not allow SP/PC to be declared in inline asm lists.
     include_dirs: ["external/libunwind/include/tdep"],
 
-    // TODO: LLVM_DEVICE_BUILD_MK
-    // TODO: LLVM_HOST_BUILD_MK
 
     target: {
-        host: {
-            // -fno-omit-frame-pointer should be set for host build. Because currently
-            // libunwind can't recognize .debug_frame using dwarf version 4, and it relies
-            // on stack frame pointer to do unwinding on x86.
-            // $(LLVM_HOST_BUILD_MK) overwrites -fno-omit-frame-pointer. so the below line
-            // must be after the include.
-            cflags: [
-                "-Wno-extern-c-compat",
-                "-fno-omit-frame-pointer",
-            ],
-        },
-
         darwin: {
             enabled: false,
         },
@@ -117,4 +103,108 @@ cc_library_shared {
     },
     cflags: ["-O0"],
     srcs: ["backtrace_testlib.c"],
+
+    target: {
+        linux: {
+            shared_libs: [
+                "libunwind",
+            ],
+        },
+        android: {
+            shared_libs: [
+                "libunwind",
+            ],
+        },
+    }
+}
+
+//-------------------------------------------------------------------------
+// The libbacktrace_offline static library.
+//-------------------------------------------------------------------------
+cc_library_static {
+    name: "libbacktrace_offline",
+    defaults: ["libbacktrace_common"],
+    host_supported: true,
+    srcs: ["BacktraceOffline.cpp"],
+
+    cflags: [
+        "-D__STDC_CONSTANT_MACROS",
+        "-D__STDC_LIMIT_MACROS",
+        "-D__STDC_FORMAT_MACROS",
+    ],
+
+    header_libs: ["llvm-headers"],
+
+    // Use shared libraries so their headers get included during build.
+    shared_libs = [
+        "libbase",
+        "libunwind",
+    ],
+}
+
+//-------------------------------------------------------------------------
+// The backtrace_test executable.
+//-------------------------------------------------------------------------
+cc_test {
+    name: "backtrace_test",
+    defaults: ["libbacktrace_common"],
+    host_supported: true,
+    srcs: [
+        "backtrace_offline_test.cpp",
+        "backtrace_test.cpp",
+        "GetPss.cpp",
+        "thread_utils.c",
+    ],
+
+    cflags: [
+        "-fno-builtin",
+        "-O0",
+        "-g",
+    ],
+
+    shared_libs: [
+        "libbacktrace_test",
+        "libbacktrace",
+        "libbase",
+        "libcutils",
+        "liblog",
+        "libunwind",
+    ],
+
+    group_static_libs: true,
+
+    // Statically link LLVMlibraries to remove dependency on llvm shared library.
+    static_libs = [
+        "libbacktrace_offline",
+        "libLLVMObject",
+        "libLLVMBitReader",
+        "libLLVMMC",
+        "libLLVMMCParser",
+        "libLLVMCore",
+        "libLLVMSupport",
+
+        "libziparchive",
+        "libz",
+    ],
+
+    header_libs: ["llvm-headers"],
+
+    target: {
+        android: {
+            cflags: ["-DENABLE_PSS_TESTS"],
+            shared_libs: [
+                "libdl",
+                "libutils",
+            ],
+        },
+        linux: {
+            host_ldlibs: [
+                "-lpthread",
+                "-lrt",
+                "-ldl",
+                "-lncurses",
+            ],
+            static_libs: ["libutils"],
+        },
+    },
 }

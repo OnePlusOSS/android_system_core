@@ -177,7 +177,7 @@ static void processBuffer(log_device_t* dev, struct log_msg *buf)
         static EventTagMap *eventTagMap = NULL;
 
         if (!eventTagMap && !hasOpenedEventTagMap) {
-            eventTagMap = android_openEventTagMap(EVENT_TAG_MAP_FILE);
+            eventTagMap = android_openEventTagMap(NULL);
             hasOpenedEventTagMap = true;
         }
         err = android_log_processBinaryLogBuffer(&buf->entry_v1, &entry,
@@ -321,7 +321,7 @@ static void show_help(const char *cmd)
                     "  -g, --buffer-size                      Get the size of the ring buffer.\n"
                     "  -G <size>, --buffer-size=<size>\n"
                     "                  Set size of log ring buffer, may suffix with K or M.\n"
-                    "  -L, -last       Dump logs from prior to last reboot\n"
+                    "  -L, --last      Dump logs from prior to last reboot\n"
                     // Leave security (Device Owner only installations) and
                     // kernel (userdebug and eng) buffers undocumented.
                     "  -b <buffer>, --buffer=<buffer>         Request alternate ring buffer, 'main',\n"

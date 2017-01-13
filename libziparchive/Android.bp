@@ -20,6 +20,7 @@ cc_defaults {
         "-DZLIB_CONST",
         "-Werror",
         "-Wall",
+        "-D_FILE_OFFSET_BITS=64",
     ],
     cppflags: [
         "-Wold-style-cast",
@@ -56,13 +57,25 @@ cc_library {
     name: "libziparchive",
     host_supported: true,
     defaults: ["libziparchive_defaults", "libziparchive_flags"],
-    static_libs: ["libutils"],
     shared_libs: ["liblog", "libbase"],
     target: {
         android: {
-            static_libs: ["libz"],
+            shared_libs: ["libz", "libutils"],
         },
         host: {
+            static_libs: ["libutils"],
+        },
+        linux_bionic: {
+            static_libs: ["libz"],
+            enabled: true,
+        },
+        linux: {
+            shared_libs: ["libz-host"],
+        },
+        darwin: {
+            shared_libs: ["libz-host"],
+        },
+        windows: {
             shared_libs: ["libz-host"],
         },
     },

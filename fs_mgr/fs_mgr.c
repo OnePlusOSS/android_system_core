@@ -213,6 +213,73 @@ static ext4_fsblk_t ext4_r_blocks_count(struct ext4_super_block *es)
             le32_to_cpu(es->s_r_blocks_count_lo);
 }
 
+static int do_quota(char *blk_device, char *fs_type, struct fstab_rec *rec)
+{
+    int force_check = 0;
+    if (!strcmp(fs_type, "ext4")) {
+        /*
+         * Some system images do not have tune2fs for licensing reasons
+         * Detect these and skip reserve blocks.
+         */
+        if (access(TUNE2FS_BIN, X_OK)) {
+            ERROR("Not running %s on %s (executable not in system image)\n",
+                  TUNE2FS_BIN, blk_device);
+        } else {
+            char* arg1 = NULL;
+            char* arg2 = NULL;
+            int status = 0;
+            int ret = 0;
+            int fd = TEMP_FAILURE_RETRY(open(blk_device, O_RDONLY | O_CLOEXEC));
+            if (fd >= 0) {
+                struct ext4_super_block sb;
+                ret = read_super_block(fd, &sb);
+                if (ret < 0) {
+                    ERROR("Can't read '%s' super block: %s\n", blk_device, strerror(errno));
+                    goto out;
+                }
+
+                int has_quota = (sb.s_feature_ro_compat
+                        & cpu_to_le32(EXT4_FEATURE_RO_COMPAT_QUOTA)) != 0;
+                int want_quota = fs_mgr_is_quota(rec) != 0;
+
+                if (has_quota == want_quota) {
+                    INFO("Requested quota status is match on %s\n", blk_device);
+                    goto out;
+                } else if (want_quota) {
+                    INFO("Enabling quota on %s\n", blk_device);
+                    arg1 = "-Oquota";
+                    arg2 = "-Qusrquota,grpquota";
+                    force_check = 1;
+                } else {
+                    INFO("Disabling quota on %s\n", blk_device);
+                    arg1 = "-Q^usrquota,^grpquota";
+                    arg2 = "-O^quota";
+                }
+            } else {
+                ERROR("Failed to open '%s': %s\n", blk_device, strerror(errno));
+                return force_check;
+            }
+
+            char *tune2fs_argv[] = {
+                TUNE2FS_BIN,
+                arg1,
+                arg2,
+                blk_device,
+            };
+            ret = android_fork_execvp_ext(ARRAY_SIZE(tune2fs_argv), tune2fs_argv,
+                                          &status, true, LOG_KLOG | LOG_FILE,
+                                          true, NULL, NULL, 0);
+            if (ret < 0) {
+                /* No need to check for error in fork, we can't really handle it now */
+                ERROR("Failed trying to run %s\n", TUNE2FS_BIN);
+            }
+      out:
+            close(fd);
+        }
+    }
+    return force_check;
+}
+
 static void do_reserved_size(char *blk_device, char *fs_type, struct fstab_rec *rec)
 {
     /* Check for the types of filesystems we know how to check */
@@ -397,7 +464,7 @@ static int mount_with_alternatives(struct fstab *fstab, int start_idx, int *end_
     if (!end_idx || !attempted_idx || start_idx >= fstab->num_entries) {
       errno = EINVAL;
       if (end_idx) *end_idx = start_idx;
-      if (attempted_idx) *end_idx = start_idx;
+      if (attempted_idx) *attempted_idx = start_idx;
       return -1;
     }
 
@@ -417,7 +484,10 @@ static int mount_with_alternatives(struct fstab *fstab, int start_idx, int *end_
                 continue;
             }
 
-            if (fstab->recs[i].fs_mgr_flags & MF_CHECK) {
+            int force_check = do_quota(fstab->recs[i].blk_device, fstab->recs[i].fs_type,
+                                       &fstab->recs[i]);
+
+            if ((fstab->recs[i].fs_mgr_flags & MF_CHECK) || force_check) {
                 check_fs(fstab->recs[i].blk_device, fstab->recs[i].fs_type,
                          fstab->recs[i].mount_point);
             }
@@ -631,7 +701,7 @@ int fs_mgr_mount_all(struct fstab *fstab, int mount_mode)
         }
 
         if ((fstab->recs[i].fs_mgr_flags & MF_VERIFY) && device_is_secure()) {
-            int rc = fs_mgr_setup_verity(&fstab->recs[i]);
+            int rc = fs_mgr_setup_verity(&fstab->recs[i], true);
             if (__android_log_is_debuggable() && rc == FS_MGR_SETUP_VERITY_DISABLED) {
                 INFO("Verity disabled");
             } else if (rc != FS_MGR_SETUP_VERITY_SUCCESS) {
@@ -787,7 +857,10 @@ int fs_mgr_do_mount(struct fstab *fstab, const char *n_name, char *n_blk_device,
             wait_for_file(n_blk_device, WAIT_TIMEOUT);
         }
 
-        if (fstab->recs[i].fs_mgr_flags & MF_CHECK) {
+        int force_check = do_quota(fstab->recs[i].blk_device, fstab->recs[i].fs_type,
+                                   &fstab->recs[i]);
+
+        if ((fstab->recs[i].fs_mgr_flags & MF_CHECK) || force_check) {
             check_fs(n_blk_device, fstab->recs[i].fs_type,
                      fstab->recs[i].mount_point);
         }
@@ -797,7 +870,7 @@ int fs_mgr_do_mount(struct fstab *fstab, const char *n_name, char *n_blk_device,
         }
 
         if ((fstab->recs[i].fs_mgr_flags & MF_VERIFY) && device_is_secure()) {
-            int rc = fs_mgr_setup_verity(&fstab->recs[i]);
+            int rc = fs_mgr_setup_verity(&fstab->recs[i], true);
             if (__android_log_is_debuggable() && rc == FS_MGR_SETUP_VERITY_DISABLED) {
                 INFO("Verity disabled");
             } else if (rc != FS_MGR_SETUP_VERITY_SUCCESS) {
@@ -1013,7 +1086,7 @@ int fs_mgr_get_crypt_info(struct fstab *fstab, char *key_loc, char *real_blk_dev
 int fs_mgr_early_setup_verity(struct fstab_rec *fstab_rec)
 {
     if ((fstab_rec->fs_mgr_flags & MF_VERIFY) && device_is_secure()) {
-        int rc = fs_mgr_setup_verity(fstab_rec);
+        int rc = fs_mgr_setup_verity(fstab_rec, false);
         if (__android_log_is_debuggable() && rc == FS_MGR_SETUP_VERITY_DISABLED) {
             INFO("Verity disabled");
             return FS_MGR_EARLY_SETUP_VERITY_NO_VERITY;

@@ -184,7 +184,7 @@ public:
                     ret = rsp.timeout;
                 }
             });
-            if (!hwRes.getStatus().isOk()) {
+            if (!hwRes.isOk()) {
                 ALOGE("enroll transaction failed\n");
                 ret = -1;
             }
@@ -196,7 +196,14 @@ public:
                     enrolled_password_handle, enrolled_password_handle_length);
         }
 
-        if (ret == 0) {
+        if (ret == GATEKEEPER_RESPONSE_OK && (*enrolled_password_handle == nullptr ||
+            *enrolled_password_handle_length != sizeof(password_handle_t))) {
+            ret = GATEKEEPER_RESPONSE_ERROR;
+            ALOGE("HAL: password_handle=%p size_of_handle=%" PRIu32 "\n",
+                  *enrolled_password_handle, *enrolled_password_handle_length);
+        }
+
+        if (ret == GATEKEEPER_RESPONSE_OK) {
             gatekeeper::password_handle_t *handle =
                     reinterpret_cast<gatekeeper::password_handle_t *>(*enrolled_password_handle);
             store_sid(uid, handle->user_id);
@@ -267,7 +274,7 @@ public:
                         ret = rsp.timeout;
                     }
                 });
-                if (!hwRes.getStatus().isOk()) {
+                if (!hwRes.isOk()) {
                     ALOGE("verify transaction failed\n");
                     ret = -1;
                 }
