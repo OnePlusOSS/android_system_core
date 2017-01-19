@@ -34,9 +34,9 @@
 #include <libminijail.h>
 #include <scoped_minijail.h>
 
-#include "debuggerd/client.h"
 #include <private/android_filesystem_config.h>
 #include <private/android_logger.h>
+#include "debuggerd/handler.h"
 #include "selinux/android.h"
 
 #include "adb.h"
@@ -170,7 +170,7 @@ int adbd_main(int server_port) {
     drop_privileges(server_port);
 
     bool is_usb = false;
-    if (access(USB_ADB_PATH, F_OK) == 0 || access(USB_FFS_ADB_EP0, F_OK) == 0) {
+    if (access(USB_FFS_ADB_EP0, F_OK) == 0) {
         // Listen on USB.
         usb_init();
         is_usb = true;

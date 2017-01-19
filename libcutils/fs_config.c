@@ -33,7 +33,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include <android/log.h>
+#include <log/log.h>
 #include <private/android_filesystem_config.h>
 #include <utils/Compat.h>
 
@@ -168,6 +168,10 @@ static const struct fs_path_config android_files[] = {
                                            CAP_MASK_LONG(CAP_NET_RAW),
                                               "system/bin/hw/android.hardware.wifi@1.0-service" },
 
+    /* Support Bluetooth legacy hal accessing /sys/class/rfkill */
+    { 00700, AID_BLUETOOTH, AID_BLUETOOTH, CAP_MASK_LONG(CAP_NET_ADMIN),
+                                              "system/bin/hw/android.hardware.bluetooth@1.0-service" },
+
     /* A non-privileged zygote that spawns isolated processes for web rendering. */
     { 0750,  AID_ROOT,      AID_ROOT,      CAP_MASK_LONG(CAP_SETUID) |
                                            CAP_MASK_LONG(CAP_SETGID) |
@@ -178,6 +182,9 @@ static const struct fs_path_config android_files[] = {
                                            CAP_MASK_LONG(CAP_SETPCAP),
                                               "system/bin/webview_zygote64" },
 
+    { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/crash_dump32" },
+    { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/crash_dump64" },
+    { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/debuggerd" },
     { 00750, AID_ROOT,      AID_ROOT,      0, "system/bin/uncrypt" },
     { 00750, AID_ROOT,      AID_ROOT,      0, "system/bin/install-recovery.sh" },
     { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/*" },

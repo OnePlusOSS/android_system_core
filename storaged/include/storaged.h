@@ -17,13 +17,10 @@
 #ifndef _STORAGED_H_
 #define _STORAGED_H_
 
-#define DEBUG
-
 #include <queue>
 #include <semaphore.h>
 #include <stdint.h>
 #include <string>
-#include <syslog.h>
 #include <unordered_map>
 #include <vector>
 
@@ -38,21 +35,6 @@ friend class test_case_name##_##test_name##_Test
 #else
 #define debuginfo(...)
 #endif
-
-#define KMSG_PRIORITY(PRI)                            \
-    '<',                                              \
-    '0' + LOG_MAKEPRI(LOG_DAEMON, LOG_PRI(PRI)) / 10, \
-    '0' + LOG_MAKEPRI(LOG_DAEMON, LOG_PRI(PRI)) % 10, \
-    '>'
-
-static char kmsg_error_prefix[] = { KMSG_PRIORITY(LOG_ERR),
-    's', 't', 'o', 'r', 'a', 'g', 'e', 'd', ':', '\0' };
-
-static char kmsg_info_prefix[] = { KMSG_PRIORITY(LOG_INFO),
-    's', 't', 'o', 'r', 'a', 'g', 'e', 'd', ':', '\0' };
-
-static char kmsg_warning_prefix[] = { KMSG_PRIORITY(LOG_WARNING),
-    's', 't', 'o', 'r', 'a', 'g', 'e', 'd', ':', '\0' };
 
 // number of attributes diskstats has
 #define DISK_STATS_SIZE ( 11 )
@@ -85,7 +67,7 @@ struct disk_stats {
     double   io_avg;         // average io_in_flight for accumulate calculations
 };
 
-#define MMC_VER_STR_LEN ( 8 )   // maximum length of the MMC version string
+#define MMC_VER_STR_LEN ( 9 )   // maximum length of the MMC version string, including NULL terminator
 // minimum size of a ext_csd file
 #define EXT_CSD_FILE_MIN_SIZE ( 1024 )
 struct emmc_info {
@@ -275,9 +257,9 @@ public:
 };
 
 // Periodic chores intervals in seconds
-#define DEFAULT_PERIODIC_CHORES_INTERVAL_UNIT ( 20 )
-#define DEFAULT_PERIODIC_CHORES_INTERVAL_DISK_STATS_PUBLISH ( 60 )
-#define DEFAULT_PERIODIC_CHORES_INTERVAL_EMMC_INFO_PUBLISH ( 60 * 2 )
+#define DEFAULT_PERIODIC_CHORES_INTERVAL_UNIT ( 60 )
+#define DEFAULT_PERIODIC_CHORES_INTERVAL_DISK_STATS_PUBLISH ( 3600 )
+#define DEFAULT_PERIODIC_CHORES_INTERVAL_EMMC_INFO_PUBLISH ( 86400 )
 
 struct storaged_config {
     int periodic_chores_interval_unit;

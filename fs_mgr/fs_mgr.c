@@ -101,7 +101,9 @@ static void check_fs(char *blk_device, char *fs_type, char *target)
     char tmpmnt_opts[64] = "errors=remount-ro";
     char *e2fsck_argv[] = {
         E2FSCK_BIN,
+#ifndef TARGET_USES_MKE2FS // "-f" only for old ext4 generation tool
         "-f",
+#endif
         "-y",
         blk_device
     };
@@ -642,6 +644,17 @@ static int handle_encryptable(const struct fstab_rec* rec)
     } else {
         return FS_MGR_MNTALL_DEV_NOT_ENCRYPTABLE;
     }
+}
+
+int fs_mgr_test_access(const char *device) {
+    int tries = 25;
+    while (tries--) {
+        if (!access(device, F_OK) || errno != ENOENT) {
+            return 0;
+        }
+        usleep(40 * 1000);
+    }
+    return -1;
 }
 
 /* When multiple fstab records share the same mount_point, it will

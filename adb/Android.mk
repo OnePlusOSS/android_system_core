@@ -336,13 +336,13 @@ LOCAL_STATIC_LIBRARIES := \
     libfec_rs \
     libselinux \
     liblog \
-    libext4_utils_static \
+    libext4_utils \
     libsquashfs_utils \
     libcutils \
     libbase \
     libcrypto_utils \
     libcrypto \
     libminijail \
-    libdebuggerd_client \
+    libdebuggerd_handler \
 
 include $(BUILD_EXECUTABLE)
