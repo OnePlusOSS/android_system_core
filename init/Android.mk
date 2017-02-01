@@ -70,6 +70,7 @@ LOCAL_SRC_FILES:= \
     init.cpp \
     keychords.cpp \
     property_service.cpp \
+    seccomp.cpp \
     signal_handler.cpp \
     ueventd.cpp \
     ueventd_parser.cpp \
@@ -96,6 +97,7 @@ LOCAL_STATIC_LIBRARIES := \
     libbase \
     libc \
     libselinux \
+    libseccomp_policy \
     liblog \
     libcrypto_utils \
     libcrypto \
@@ -105,6 +107,7 @@ LOCAL_STATIC_LIBRARIES := \
     libz \
     libprocessgroup \
     libnl \
+    libavb
 
 # Create symlinks.
 LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \

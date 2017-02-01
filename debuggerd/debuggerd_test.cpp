@@ -17,6 +17,7 @@
 #include <err.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 
 #include <chrono>
@@ -90,6 +91,7 @@ class CrasherTest : public ::testing::Test {
   // Returns -1 if we fail to read a response from tombstoned, otherwise the received return code.
   void FinishIntercept(int* result);
 
+  void StartProcess(std::function<void()> function);
   void StartCrasher(const std::string& crash_type);
   void FinishCrasher();
   void AssertDeath(int signo);
@@ -166,9 +168,8 @@ void CrasherTest::FinishIntercept(int* result) {
   }
 }
 
-void CrasherTest::StartCrasher(const std::string& crash_type) {
-  std::string type = "wait-" + crash_type;
-
+void CrasherTest::StartProcess(std::function<void()> function) {
+  unique_fd read_pipe;
   unique_fd crasher_read_pipe;
   if (!Pipe(&crasher_read_pipe, &crasher_pipe)) {
     FAIL() << "failed to create pipe: " << strerror(errno);
@@ -182,9 +183,17 @@ void CrasherTest::StartCrasher(const std::string& crash_type) {
     dup2(crasher_read_pipe.get(), STDIN_FILENO);
     dup2(devnull.get(), STDOUT_FILENO);
     dup2(devnull.get(), STDERR_FILENO);
+    function();
+    _exit(0);
+  }
+}
+
+void CrasherTest::StartCrasher(const std::string& crash_type) {
+  std::string type = "wait-" + crash_type;
+  StartProcess([type]() {
     execl(CRASHER_PATH, CRASHER_PATH, type.c_str(), nullptr);
     err(1, "exec failed");
-  }
+  });
 }
 
 void CrasherTest::FinishCrasher() {
@@ -340,24 +349,15 @@ TEST_F(CrasherTest, wait_for_gdb) {
   AssertDeath(SIGABRT);
 }
 
+// wait_for_gdb shouldn't trigger on manually sent signals.
 TEST_F(CrasherTest, wait_for_gdb_signal) {
   if (!android::base::SetProperty(kWaitForGdbKey, "1")) {
     FAIL() << "failed to enable wait_for_gdb";
   }
 
   StartCrasher("abort");
-  ASSERT_EQ(0, kill(crasher_pid, SIGABRT)) << strerror(errno);
-
-  std::this_thread::sleep_for(500ms);
-
-  int status;
-  ASSERT_EQ(crasher_pid, (TIMEOUT(1, waitpid(crasher_pid, &status, WUNTRACED))));
-  ASSERT_TRUE(WIFSTOPPED(status));
-  ASSERT_EQ(SIGSTOP, WSTOPSIG(status));
-
-  ASSERT_EQ(0, kill(crasher_pid, SIGCONT)) << strerror(errno);
-
-  AssertDeath(SIGABRT);
+  ASSERT_EQ(0, kill(crasher_pid, SIGSEGV)) << strerror(errno);
+  AssertDeath(SIGSEGV);
 }
 
 TEST_F(CrasherTest, backtrace) {
@@ -387,4 +387,21 @@ TEST_F(CrasherTest, backtrace) {
   ASSERT_EQ(1, intercept_result) << "tombstoned reported failure";
   ConsumeFd(std::move(output_fd), &result);
   ASSERT_MATCH(result, R"(#00 pc [0-9a-f]+\s+ /system/lib)" ARCH_SUFFIX R"(/libc.so \(tgkill)");
+}
+
+TEST_F(CrasherTest, PR_SET_DUMPABLE_0_crash) {
+  StartProcess([]() {
+    prctl(PR_SET_DUMPABLE, 0);
+    volatile char* null = static_cast<char*>(nullptr);
+    *null = '\0';
+  });
+  AssertDeath(SIGSEGV);
+}
+
+TEST_F(CrasherTest, PR_SET_DUMPABLE_0_raise) {
+  StartProcess([]() {
+    prctl(PR_SET_DUMPABLE, 0);
+    raise(SIGUSR1);
+  });
+  AssertDeath(SIGUSR1);
 }

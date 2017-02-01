@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -46,6 +47,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "private/bionic_futex.h"
 #include "private/libc_logging.h"
 
 // see man(2) prctl, specifically the section about PR_GET_NAME
@@ -60,6 +62,9 @@
 #define CRASH_DUMP_PATH "/system/bin/" CRASH_DUMP_NAME
 
 static debuggerd_callbacks_t g_callbacks;
+
+// Mutex to ensure only one crashing thread dumps itself.
+static pthread_mutex_t crash_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Don't use __libc_fatal because it exits via abort, which might put us back into a signal handler.
 #define fatal(...)                                             \
@@ -78,6 +83,21 @@ static debuggerd_callbacks_t g_callbacks;
  * could allocate memory or hold a lock.
  */
 static void log_signal_summary(int signum, const siginfo_t* info) {
+  char thread_name[MAX_TASK_NAME_LEN + 1];  // one more for termination
+  if (prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(thread_name), 0, 0, 0) != 0) {
+    strcpy(thread_name, "<name unknown>");
+  } else {
+    // short names are null terminated by prctl, but the man page
+    // implies that 16 byte names are not.
+    thread_name[MAX_TASK_NAME_LEN] = 0;
+  }
+
+  if (signum == DEBUGGER_SIGNAL) {
+    __libc_format_log(ANDROID_LOG_FATAL, "libc", "Requested dump for tid %d (%s)", gettid(),
+                      thread_name);
+    return;
+  }
+
   const char* signal_name = "???";
   bool has_address = false;
   switch (signum) {
@@ -113,15 +133,6 @@ static void log_signal_summary(int signum, const siginfo_t* info) {
       break;
   }
 
-  char thread_name[MAX_TASK_NAME_LEN + 1];  // one more for termination
-  if (prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(thread_name), 0, 0, 0) != 0) {
-    strcpy(thread_name, "<name unknown>");
-  } else {
-    // short names are null terminated by prctl, but the man page
-    // implies that 16 byte names are not.
-    thread_name[MAX_TASK_NAME_LEN] = 0;
-  }
-
   // "info" will be null if the siginfo_t information was not available.
   // Many signals don't have an address or a code.
   char code_desc[32];  // ", code -6"
@@ -133,6 +144,7 @@ static void log_signal_summary(int signum, const siginfo_t* info) {
       __libc_format_buffer(addr_desc, sizeof(addr_desc), ", fault addr %p", info->si_addr);
     }
   }
+
   __libc_format_log(ANDROID_LOG_FATAL, "libc", "Fatal signal %d (%s)%s%s in tid %d (%s)", signum,
                     signal_name, code_desc, addr_desc, gettid(), thread_name);
 }
@@ -151,8 +163,7 @@ static bool have_siginfo(int signum) {
 }
 
 struct debugger_thread_info {
-  pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-  bool crash_dump_started = false;
+  bool crash_dump_started;
   pid_t crashing_tid;
   pid_t pseudothread_tid;
   int signal_number;
@@ -228,16 +239,43 @@ static int debuggerd_dispatch_pseudothread(void* arg) {
     }
   }
 
-  pthread_mutex_unlock(&thread_info->mutex);
+  syscall(__NR_exit, 0);
   return 0;
+}
+
+static void resend_signal(siginfo_t* info, bool crash_dump_started) {
+  // Signals can either be fatal or nonfatal.
+  // For fatal signals, crash_dump will send us the signal we crashed with
+  // before resuming us, so that processes using waitpid on us will see that we
+  // exited with the correct exit status (e.g. so that sh will report
+  // "Segmentation fault" instead of "Killed"). For this to work, we need
+  // to deregister our signal handler for that signal before continuing.
+  if (info->si_signo != DEBUGGER_SIGNAL) {
+    signal(info->si_signo, SIG_DFL);
+  }
+
+  // We need to return from our signal handler so that crash_dump can see the
+  // signal via ptrace and dump the thread that crashed. However, returning
+  // does not guarantee that the signal will be thrown again, even for SIGSEGV
+  // and friends, since the signal could have been sent manually. We blocked
+  // all signals when registering the handler, so resending the signal (using
+  // rt_tgsigqueueinfo(2) to preserve SA_SIGINFO) will cause it to be delivered
+  // when our signal handler returns.
+  if (crash_dump_started || info->si_signo != DEBUGGER_SIGNAL) {
+    int rc = syscall(SYS_rt_tgsigqueueinfo, getpid(), gettid(), info->si_signo, info);
+    if (rc != 0) {
+      fatal("failed to resend signal during crash: %s", strerror(errno));
+    }
+  }
+
+  if (info->si_signo == DEBUGGER_SIGNAL) {
+    pthread_mutex_unlock(&crash_mutex);
+  }
 }
 
 // Handler that does crash dumping by forking and doing the processing in the child.
 // Do this by ptracing the relevant thread, and then execing debuggerd to do the actual dump.
 static void debuggerd_signal_handler(int signal_number, siginfo_t* info, void*) {
-  // Mutex to prevent multiple crashing threads from trying to talk
-  // to debuggerd at the same time.
-  static pthread_mutex_t crash_mutex = PTHREAD_MUTEX_INITIALIZER;
   int ret = pthread_mutex_lock(&crash_mutex);
   if (ret != 0) {
     __libc_format_log(ANDROID_LOG_INFO, "libc", "pthread_mutex_lock failed: %s", strerror(ret));
@@ -250,59 +288,10 @@ static void debuggerd_signal_handler(int signal_number, siginfo_t* info, void*) 
     info = nullptr;
   }
 
-  log_signal_summary(signal_number, info);
-  if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0) {
-    // process has disabled core dumps and PTRACE_ATTACH, and does not want to be dumped.
-    // Honor that intention by not connecting to debuggerd and asking it to dump our internal state.
-    __libc_format_log(ANDROID_LOG_INFO, "libc",
-                      "Suppressing debuggerd output because prctl(PR_GET_DUMPABLE)==0");
-
-    pthread_mutex_unlock(&crash_mutex);
-    return;
-  }
-
-  void* abort_message = nullptr;
-  if (g_callbacks.get_abort_message) {
-    abort_message = g_callbacks.get_abort_message();
-  }
-
-  debugger_thread_info thread_info = {
-    .crashing_tid = gettid(),
-    .signal_number = signal_number,
-    .info = info
-  };
-  pthread_mutex_lock(&thread_info.mutex);
-
-  // Essentially pthread_create without CLONE_FILES (see debuggerd_dispatch_pseudothread).
-  pid_t child_pid = clone(debuggerd_dispatch_pseudothread, pseudothread_stack,
-                          CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_CHILD_SETTID,
-                          &thread_info, nullptr, nullptr, &thread_info.pseudothread_tid);
-  if (child_pid == -1) {
-    fatal("failed to spawn debuggerd dispatch thread: %s", strerror(errno));
-  }
-
-  // Wait for the child to finish and unlock the mutex.
-  // This relies on bionic behavior that isn't guaranteed by the standard.
-  pthread_mutex_lock(&thread_info.mutex);
-
-  // Signals can either be fatal or nonfatal.
-  // For fatal signals, crash_dump will PTRACE_CONT us with the signal we
-  // crashed with, so that processes using waitpid on us will see that we
-  // exited with the correct exit status (e.g. so that sh will report
-  // "Segmentation fault" instead of "Killed"). For this to work, we need
-  // to deregister our signal handler for that signal before continuing.
-  if (signal_number != DEBUGGER_SIGNAL) {
-    signal(signal_number, SIG_DFL);
-  }
-
-  // We need to return from the signal handler so that debuggerd can dump the
-  // thread that crashed, but returning here does not guarantee that the signal
-  // will be thrown again, even for SIGSEGV and friends, since the signal could
-  // have been sent manually. Resend the signal with rt_tgsigqueueinfo(2) to
-  // preserve the SA_SIGINFO contents.
-  struct siginfo si;
+  struct siginfo si = {};
   if (!info) {
     memset(&si, 0, sizeof(si));
+    si.si_signo = signal_number;
     si.si_code = SI_USER;
     si.si_pid = getpid();
     si.si_uid = getuid();
@@ -314,23 +303,59 @@ static void debuggerd_signal_handler(int signal_number, siginfo_t* info, void*) 
     // check to allow all si_code values in calls coming from inside the house.
   }
 
+  log_signal_summary(signal_number, info);
+
+  if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1) {
+    // The process has NO_NEW_PRIVS enabled, so we can't transition to the crash_dump context.
+    __libc_format_log(ANDROID_LOG_INFO, "libc",
+                      "Suppressing debuggerd output because prctl(PR_GET_NO_NEW_PRIVS)==1");
+    resend_signal(info, false);
+    return;
+  }
+
+  void* abort_message = nullptr;
+  if (g_callbacks.get_abort_message) {
+    abort_message = g_callbacks.get_abort_message();
+  }
   // Populate si_value with the abort message address, if found.
   if (abort_message) {
     info->si_value.sival_ptr = abort_message;
   }
 
-  // Only resend the signal if we know that either crash_dump has ptraced us or
-  // the signal was fatal.
-  if (thread_info.crash_dump_started || signal_number != DEBUGGER_SIGNAL) {
-    int rc = syscall(SYS_rt_tgsigqueueinfo, getpid(), gettid(), signal_number, info);
-    if (rc != 0) {
-      fatal("failed to resend signal during crash: %s", strerror(errno));
-    }
+  debugger_thread_info thread_info = {
+    .crash_dump_started = false,
+    .pseudothread_tid = -1,
+    .crashing_tid = gettid(),
+    .signal_number = signal_number,
+    .info = info
+  };
+
+  // Essentially pthread_create without CLONE_FILES (see debuggerd_dispatch_pseudothread).
+  pid_t child_pid =
+    clone(debuggerd_dispatch_pseudothread, pseudothread_stack,
+          CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID,
+          &thread_info, nullptr, nullptr, &thread_info.pseudothread_tid);
+  if (child_pid == -1) {
+    fatal("failed to spawn debuggerd dispatch thread: %s", strerror(errno));
   }
 
-  if (signal_number == DEBUGGER_SIGNAL) {
-    pthread_mutex_unlock(&crash_mutex);
+  // Wait for the child to start...
+  __futex_wait(&thread_info.pseudothread_tid, -1, nullptr);
+
+  // and then wait for it to finish.
+  __futex_wait(&thread_info.pseudothread_tid, child_pid, nullptr);
+
+  // Signals can either be fatal or nonfatal.
+  // For fatal signals, crash_dump will PTRACE_CONT us with the signal we
+  // crashed with, so that processes using waitpid on us will see that we
+  // exited with the correct exit status (e.g. so that sh will report
+  // "Segmentation fault" instead of "Killed"). For this to work, we need
+  // to deregister our signal handler for that signal before continuing.
+  if (signal_number != DEBUGGER_SIGNAL) {
+    signal(signal_number, SIG_DFL);
   }
+
+  resend_signal(info, thread_info.crash_dump_started);
 }
 
 void debuggerd_init(debuggerd_callbacks_t* callbacks) {
@@ -363,15 +388,5 @@ void debuggerd_init(debuggerd_callbacks_t* callbacks) {
 
   // Use the alternate signal stack if available so we can catch stack overflows.
   action.sa_flags |= SA_ONSTACK;
-
-  sigaction(SIGABRT, &action, nullptr);
-  sigaction(SIGBUS, &action, nullptr);
-  sigaction(SIGFPE, &action, nullptr);
-  sigaction(SIGILL, &action, nullptr);
-  sigaction(SIGSEGV, &action, nullptr);
-#if defined(SIGSTKFLT)
-  sigaction(SIGSTKFLT, &action, nullptr);
-#endif
-  sigaction(SIGTRAP, &action, nullptr);
-  sigaction(DEBUGGER_SIGNAL, &action, nullptr);
+  debuggerd_register_handlers(&action);
 }

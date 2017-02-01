@@ -62,6 +62,7 @@
 #include "keychords.h"
 #include "log.h"
 #include "property_service.h"
+#include "seccomp.h"
 #include "service.h"
 #include "signal_handler.h"
 #include "ueventd.h"
@@ -177,7 +178,7 @@ static int wait_for_coldboot_done_action(const std::vector<std::string>& args) {
         panic();
     }
 
-    property_set("ro.boottime.init.cold_boot_wait", std::to_string(t.duration_ns()).c_str());
+    property_set("ro.boottime.init.cold_boot_wait", std::to_string(t.duration_ms()).c_str());
     return 0;
 }
 
@@ -262,26 +263,18 @@ static void security_failure() {
     panic();
 }
 
-#define MMAP_RND_PATH "/proc/sys/vm/mmap_rnd_bits"
-#define MMAP_RND_COMPAT_PATH "/proc/sys/vm/mmap_rnd_compat_bits"
-
-/* __attribute__((unused)) due to lack of mips support: see mips block
- * in set_mmap_rnd_bits_action */
-static bool __attribute__((unused)) set_mmap_rnd_bits_min(int start, int min, bool compat) {
-    std::string path;
-    if (compat) {
-        path = MMAP_RND_COMPAT_PATH;
-    } else {
-        path = MMAP_RND_PATH;
-    }
+static bool set_highest_available_option_value(std::string path, int min, int max)
+{
     std::ifstream inf(path, std::fstream::in);
     if (!inf) {
         LOG(ERROR) << "Cannot open for reading: " << path;
         return false;
     }
-    while (start >= min) {
+
+    int current = max;
+    while (current >= min) {
         // try to write out new value
-        std::string str_val = std::to_string(start);
+        std::string str_val = std::to_string(current);
         std::ofstream of(path, std::fstream::out);
         if (!of) {
             LOG(ERROR) << "Cannot open for writing: " << path;
@@ -297,14 +290,31 @@ static bool __attribute__((unused)) set_mmap_rnd_bits_min(int start, int min, bo
         if (str_val.compare(str_rec) == 0) {
             break;
         }
-        start--;
+        current--;
     }
     inf.close();
-    if (start < min) {
-        LOG(ERROR) << "Unable to set minimum required entropy " << min << " in " << path;
+
+    if (current < min) {
+        LOG(ERROR) << "Unable to set minimum option value " << min << " in " << path;
         return false;
     }
     return true;
+}
+
+#define MMAP_RND_PATH "/proc/sys/vm/mmap_rnd_bits"
+#define MMAP_RND_COMPAT_PATH "/proc/sys/vm/mmap_rnd_compat_bits"
+
+/* __attribute__((unused)) due to lack of mips support: see mips block
+ * in set_mmap_rnd_bits_action */
+static bool __attribute__((unused)) set_mmap_rnd_bits_min(int start, int min, bool compat) {
+    std::string path;
+    if (compat) {
+        path = MMAP_RND_COMPAT_PATH;
+    } else {
+        path = MMAP_RND_PATH;
+    }
+
+    return set_highest_available_option_value(path, min, start);
 }
 
 /*
@@ -357,6 +367,25 @@ static int set_mmap_rnd_bits_action(const std::vector<std::string>& args)
         security_failure();
     }
     return ret;
+}
+
+#define KPTR_RESTRICT_PATH "/proc/sys/kernel/kptr_restrict"
+#define KPTR_RESTRICT_MINVALUE 2
+#define KPTR_RESTRICT_MAXVALUE 4
+
+/* Set kptr_restrict to the highest available level.
+ *
+ * Aborts if unable to set this to an acceptable value.
+ */
+static int set_kptr_restrict_action(const std::vector<std::string>& args)
+{
+    std::string path = KPTR_RESTRICT_PATH;
+
+    if (!set_highest_available_option_value(path, KPTR_RESTRICT_MINVALUE, KPTR_RESTRICT_MAXVALUE)) {
+        LOG(ERROR) << "Unable to set adequate kptr_restrict value!";
+        security_failure();
+    }
+    return 0;
 }
 
 static int keychord_init_action(const std::vector<std::string>& args)
@@ -547,7 +576,7 @@ static void selinux_initialize(bool in_kernel_domain) {
         }
 
         // init's first stage can't set properties, so pass the time to the second stage.
-        setenv("INIT_SELINUX_TOOK", std::to_string(t.duration_ns()).c_str(), 1);
+        setenv("INIT_SELINUX_TOOK", std::to_string(t.duration_ms()).c_str(), 1);
     } else {
         selinux_init_all_handles();
     }
@@ -728,8 +757,9 @@ int main(int argc, char** argv) {
 
         setenv("INIT_SECOND_STAGE", "true", 1);
 
-        uint64_t start_ns = start_time.time_since_epoch().count();
-        setenv("INIT_STARTED_AT", StringPrintf("%" PRIu64, start_ns).c_str(), 1);
+        static constexpr uint32_t kNanosecondsPerMillisecond = 1e6;
+        uint64_t start_ms = start_time.time_since_epoch().count() / kNanosecondsPerMillisecond;
+        setenv("INIT_STARTED_AT", StringPrintf("%" PRIu64, start_ms).c_str(), 1);
 
         char* path = argv[0];
         char* args[] = { path, nullptr };
@@ -763,6 +793,12 @@ int main(int argc, char** argv) {
 
         // Now set up SELinux for second stage.
         selinux_initialize(false);
+
+        // Install system-wide seccomp filter
+        if (!set_seccomp_filter()) {
+            LOG(ERROR) << "Failed to set seccomp policy";
+            security_failure();
+        }
     }
 
     // These directories were necessarily created before initial policy load
@@ -775,7 +811,8 @@ int main(int argc, char** argv) {
     restorecon("/dev/random");
     restorecon("/dev/urandom");
     restorecon("/dev/__properties__");
-    restorecon("/property_contexts");
+    restorecon("/plat_property_contexts");
+    restorecon("/nonplat_property_contexts");
     restorecon("/sys", SELINUX_ANDROID_RESTORECON_RECURSE);
     restorecon("/dev/block", SELINUX_ANDROID_RESTORECON_RECURSE);
     restorecon("/dev/device-mapper");
@@ -800,7 +837,12 @@ int main(int argc, char** argv) {
     parser.AddSectionParser("service",std::make_unique<ServiceParser>());
     parser.AddSectionParser("on", std::make_unique<ActionParser>());
     parser.AddSectionParser("import", std::make_unique<ImportParser>());
-    parser.ParseConfig("/init.rc");
+    std::string bootscript = property_get("ro.boot.init_rc");
+    if (bootscript.empty()) {
+        parser.ParseConfig("/init.rc");
+    } else {
+        parser.ParseConfig(bootscript);
+    }
 
     ActionManager& am = ActionManager::GetInstance();
 
@@ -811,6 +853,7 @@ int main(int argc, char** argv) {
     // ... so that we can start queuing up actions that require stuff from /dev.
     am.QueueBuiltinAction(mix_hwrng_into_linux_rng_action, "mix_hwrng_into_linux_rng");
     am.QueueBuiltinAction(set_mmap_rnd_bits_action, "set_mmap_rnd_bits");
+    am.QueueBuiltinAction(set_kptr_restrict_action, "set_kptr_restrict");
     am.QueueBuiltinAction(keychord_init_action, "keychord_init");
     am.QueueBuiltinAction(console_init_action, "console_init");
 
