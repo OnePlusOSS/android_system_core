@@ -62,7 +62,6 @@
 #include "keychords.h"
 #include "log.h"
 #include "property_service.h"
-#include "seccomp.h"
 #include "service.h"
 #include "signal_handler.h"
 #include "ueventd.h"
@@ -83,9 +82,13 @@ static time_t process_needs_restart_at;
 
 const char *ENV[32];
 
-bool waiting_for_exec = false;
+static std::unique_ptr<Timer> waiting_for_exec(nullptr);
 
 static int epoll_fd = -1;
+
+static std::unique_ptr<Timer> waiting_for_prop(nullptr);
+static std::string wait_prop_name;
+static std::string wait_prop_value;
 
 void register_epoll_handler(int fd, void (*fn)()) {
     epoll_event ev;
@@ -128,10 +131,52 @@ int add_environment(const char *key, const char *val)
     return -1;
 }
 
+bool start_waiting_for_exec()
+{
+    if (waiting_for_exec) {
+        return false;
+    }
+    waiting_for_exec.reset(new Timer());
+    return true;
+}
+
+void stop_waiting_for_exec()
+{
+    if (waiting_for_exec) {
+        LOG(INFO) << "Wait for exec took " << *waiting_for_exec;
+        waiting_for_exec.reset();
+    }
+}
+
+bool start_waiting_for_property(const char *name, const char *value)
+{
+    if (waiting_for_prop) {
+        return false;
+    }
+    if (property_get(name) != value) {
+        // Current property value is not equal to expected value
+        wait_prop_name = name;
+        wait_prop_value = value;
+        waiting_for_prop.reset(new Timer());
+    } else {
+        LOG(INFO) << "start_waiting_for_property(\""
+                  << name << "\", \"" << value << "\"): already set";
+    }
+    return true;
+}
+
 void property_changed(const char *name, const char *value)
 {
     if (property_triggers_enabled)
         ActionManager::GetInstance().QueuePropertyTrigger(name, value);
+    if (waiting_for_prop) {
+        if (wait_prop_name == name && wait_prop_value == value) {
+            wait_prop_name.clear();
+            wait_prop_value.clear();
+            LOG(INFO) << "Wait for property took " << *waiting_for_prop;
+            waiting_for_prop.reset();
+        }
+    }
 }
 
 static void restart_processes()
@@ -793,12 +838,6 @@ int main(int argc, char** argv) {
 
         // Now set up SELinux for second stage.
         selinux_initialize(false);
-
-        // Install system-wide seccomp filter
-        if (!set_seccomp_filter()) {
-            LOG(ERROR) << "Failed to set seccomp policy";
-            security_failure();
-        }
     }
 
     // These directories were necessarily created before initial policy load
@@ -876,7 +915,7 @@ int main(int argc, char** argv) {
     am.QueueBuiltinAction(queue_property_triggers_action, "queue_property_triggers");
 
     while (true) {
-        if (!waiting_for_exec) {
+        if (!(waiting_for_exec || waiting_for_prop)) {
             am.ExecuteOneCommand();
             restart_processes();
         }

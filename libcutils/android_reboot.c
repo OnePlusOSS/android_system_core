@@ -189,11 +189,56 @@ out:
     free_entries(&ro_entries);
 }
 
+static void save_reboot_reason(int cmd, const char *arg)
+{
+    FILE *fp;
+    const char *reason = NULL;
+
+    fp = fopen(LAST_REBOOT_REASON_FILE, "w");
+    if (fp == NULL) {
+        KLOG_WARNING(TAG, "Error creating " LAST_REBOOT_REASON_FILE
+                     ": %s\n", strerror(errno));
+        return;
+    }
+    switch (cmd) {
+        case ANDROID_RB_RESTART:
+            reason = "restart";
+            break;
+
+        case ANDROID_RB_POWEROFF:
+            reason = "power-off";
+            break;
+
+        case ANDROID_RB_RESTART2:
+            reason = arg && strlen(arg) ? arg : "restart";
+            break;
+
+        case ANDROID_RB_THERMOFF:
+            reason = "thermal-shutdown";
+            break;
+
+        default:
+            fprintf(fp,"0x%08X\n", cmd);
+            break;
+    }
+
+    if (reason) {
+        if (fprintf(fp, "%s\n", reason) < 0) {
+             KLOG_WARNING(TAG, "Error writing " LAST_REBOOT_REASON_FILE
+                          ": %s\n", strerror(errno));
+        }
+    }
+
+    fclose(fp);
+}
+
 int android_reboot_with_callback(
     int cmd, int flags __unused, const char *arg,
     void (*cb_on_remount)(const struct mntent*))
 {
     int ret;
+
+    save_reboot_reason(cmd, arg);
     remount_ro(cb_on_remount);
     switch (cmd) {
         case ANDROID_RB_RESTART:
@@ -207,6 +252,10 @@ int android_reboot_with_callback(
         case ANDROID_RB_RESTART2:
             ret = syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
                            LINUX_REBOOT_CMD_RESTART2, arg);
+            break;
+
+        case ANDROID_RB_THERMOFF:
+            ret = reboot(RB_POWER_OFF);
             break;
 
         default:

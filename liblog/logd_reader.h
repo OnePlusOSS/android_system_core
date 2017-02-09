@@ -14,9 +14,17 @@
  * limitations under the License.
  */
 
-#ifndef SECCOMP_H
-#define SECCOMP_H
+#ifndef _LIBLOG_LOGD_READER_H__
+#define _LIBLOG_LOGD_READER_H__
 
-bool set_seccomp_filter();
+#include <unistd.h>
 
-#endif
+#include "log_portability.h"
+
+__BEGIN_DECLS
+
+LIBLOG_HIDDEN ssize_t __send_log_msg(char *buf, size_t buf_size);
+
+__END_DECLS
+
+#endif /* _LIBLOG_LOGD_READER_H__ */

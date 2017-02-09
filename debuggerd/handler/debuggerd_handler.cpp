@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/capability.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -67,11 +68,22 @@ static debuggerd_callbacks_t g_callbacks;
 static pthread_mutex_t crash_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Don't use __libc_fatal because it exits via abort, which might put us back into a signal handler.
-#define fatal(...)                                             \
-  do {                                                         \
-    __libc_format_log(ANDROID_LOG_FATAL, "libc", __VA_ARGS__); \
-    _exit(1);                                                  \
-  } while (0)
+static void __noreturn __printflike(1, 2) fatal(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  __libc_format_log_va_list(ANDROID_LOG_FATAL, "libc", fmt, args);
+  _exit(1);
+}
+
+static void __noreturn __printflike(1, 2) fatal_errno(const char* fmt, ...) {
+  int err = errno;
+  va_list args;
+  va_start(args, fmt);
+
+  char buf[4096];
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  fatal("%s: %s", buf, strerror(err));
+}
 
 /*
  * Writes a summary of the signal to the log file.  We do this so that, if
@@ -192,11 +204,11 @@ static int debuggerd_dispatch_pseudothread(void* arg) {
 
   int pipefds[2];
   if (pipe(pipefds) != 0) {
-    fatal("failed to create pipe");
+    fatal_errno("failed to create pipe");
   }
 
   // Don't use fork(2) to avoid calling pthread_atfork handlers.
-  int forkpid = clone(nullptr, nullptr, SIGCHLD, nullptr);
+  int forkpid = clone(nullptr, nullptr, 0, nullptr);
   if (forkpid == -1) {
     __libc_format_log(ANDROID_LOG_FATAL, "libc", "failed to fork in debuggerd signal handler: %s",
                       strerror(errno));
@@ -205,11 +217,16 @@ static int debuggerd_dispatch_pseudothread(void* arg) {
     close(pipefds[0]);
     close(pipefds[1]);
 
+    // Set all of the ambient capability bits we can, so that crash_dump can ptrace us.
+    for (unsigned long i = 0; prctl(PR_CAPBSET_READ, i, 0, 0, 0) != -1; ++i) {
+      prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, i, 0, 0);
+    }
+
     char buf[10];
     snprintf(buf, sizeof(buf), "%d", thread_info->crashing_tid);
     execl(CRASH_DUMP_PATH, CRASH_DUMP_NAME, buf, nullptr);
 
-    fatal("exec failed: %s", strerror(errno));
+    fatal_errno("exec failed");
   } else {
     close(pipefds[1]);
     char buf[4];
@@ -231,10 +248,12 @@ static int debuggerd_dispatch_pseudothread(void* arg) {
     close(pipefds[0]);
 
     // Don't leave a zombie child.
-    siginfo_t child_siginfo;
-    if (TEMP_FAILURE_RETRY(waitid(P_PID, forkpid, &child_siginfo, WEXITED)) != 0) {
+    int status;
+    if (TEMP_FAILURE_RETRY(waitpid(forkpid, &status, __WCLONE)) == -1 && errno != ECHILD) {
       __libc_format_log(ANDROID_LOG_FATAL, "libc", "failed to wait for crash_dump helper: %s",
                         strerror(errno));
+    } else if (WIFSTOPPED(status) || WIFSIGNALED(status)) {
+      __libc_format_log(ANDROID_LOG_FATAL, "libc", "crash_dump helper crashed or stopped");
       thread_info->crash_dump_started = false;
     }
   }
@@ -264,7 +283,7 @@ static void resend_signal(siginfo_t* info, bool crash_dump_started) {
   if (crash_dump_started || info->si_signo != DEBUGGER_SIGNAL) {
     int rc = syscall(SYS_rt_tgsigqueueinfo, getpid(), gettid(), info->si_signo, info);
     if (rc != 0) {
-      fatal("failed to resend signal during crash: %s", strerror(errno));
+      fatal_errno("failed to resend signal during crash");
     }
   }
 
@@ -336,7 +355,7 @@ static void debuggerd_signal_handler(int signal_number, siginfo_t* info, void*) 
           CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID,
           &thread_info, nullptr, nullptr, &thread_info.pseudothread_tid);
   if (child_pid == -1) {
-    fatal("failed to spawn debuggerd dispatch thread: %s", strerror(errno));
+    fatal_errno("failed to spawn debuggerd dispatch thread");
   }
 
   // Wait for the child to start...
@@ -366,12 +385,12 @@ void debuggerd_init(debuggerd_callbacks_t* callbacks) {
   void* thread_stack_allocation =
     mmap(nullptr, PAGE_SIZE * 3, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (thread_stack_allocation == MAP_FAILED) {
-    fatal("failed to allocate debuggerd thread stack");
+    fatal_errno("failed to allocate debuggerd thread stack");
   }
 
   char* stack = static_cast<char*>(thread_stack_allocation) + PAGE_SIZE;
   if (mprotect(stack, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
-    fatal("failed to mprotect debuggerd thread stack");
+    fatal_errno("failed to mprotect debuggerd thread stack");
   }
 
   // Stack grows negatively, set it to the last byte in the page...

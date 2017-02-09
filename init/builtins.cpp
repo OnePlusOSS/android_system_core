@@ -265,10 +265,14 @@ static int do_exec(const std::vector<std::string>& args) {
     if (!svc) {
         return -1;
     }
-    if (!svc->Start()) {
+    if (!start_waiting_for_exec()) {
         return -1;
     }
-    waiting_for_exec = true;
+    if (!svc->Start()) {
+        stop_waiting_for_exec();
+        ServiceManager::GetInstance().RemoveService(*svc);
+        return -1;
+    }
     return 0;
 }
 
@@ -700,6 +704,9 @@ static int do_powerctl(const std::vector<std::string>& args) {
     } else if (strncmp(command, "reboot", 6) == 0) {
         cmd = ANDROID_RB_RESTART2;
         len = 6;
+    } else if (strncmp(command, "thermal-shutdown", 16) == 0) {
+        cmd = ANDROID_RB_THERMOFF;
+        len = 16;
     } else {
         LOG(ERROR) << "powerctl: unrecognized command '" << command << "'";
         return -EINVAL;
@@ -1003,6 +1010,29 @@ static int do_wait(const std::vector<std::string>& args) {
     return -1;
 }
 
+static int do_wait_for_prop(const std::vector<std::string>& args) {
+    const char* name = args[1].c_str();
+    const char* value = args[2].c_str();
+    size_t value_len = strlen(value);
+
+    if (!is_legal_property_name(name)) {
+        LOG(ERROR) << "do_wait_for_prop(\"" << name << "\", \"" << value
+                   << "\") failed: bad name";
+        return -1;
+    }
+    if (value_len >= PROP_VALUE_MAX) {
+        LOG(ERROR) << "do_wait_for_prop(\"" << name << "\", \"" << value
+                   << "\") failed: value too long";
+        return -1;
+    }
+    if (!start_waiting_for_property(name, value)) {
+        LOG(ERROR) << "do_wait_for_prop(\"" << name << "\", \"" << value
+                   << "\") failed: init already in waiting";
+        return -1;
+    }
+    return 0;
+}
+
 /*
  * Callback to make a directory from the ext4 code
  */
@@ -1074,6 +1104,7 @@ BuiltinFunctionMap::Map& BuiltinFunctionMap::map() const {
         {"verity_load_state",       {0,     0,    do_verity_load_state}},
         {"verity_update_state",     {0,     0,    do_verity_update_state}},
         {"wait",                    {1,     2,    do_wait}},
+        {"wait_for_prop",           {2,     2,    do_wait_for_prop}},
         {"write",                   {2,     2,    do_write}},
     };
     return builtin_functions;

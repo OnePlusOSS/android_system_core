@@ -25,9 +25,13 @@ __BEGIN_DECLS
 #define ANDROID_RB_RESTART  0xDEAD0001
 #define ANDROID_RB_POWEROFF 0xDEAD0002
 #define ANDROID_RB_RESTART2 0xDEAD0003
+#define ANDROID_RB_THERMOFF 0xDEAD0004
 
 /* Properties */
 #define ANDROID_RB_PROPERTY "sys.powerctl"
+
+/* Android reboot reason stored in this file */
+#define LAST_REBOOT_REASON_FILE "/data/misc/reboot/last_reboot_reason"
 
 int android_reboot(int cmd, int flags, const char *arg);
 int android_reboot_with_callback(
