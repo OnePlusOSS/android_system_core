@@ -88,30 +88,60 @@ status_t Storaged::dump(int fd, const Vector<String16>& args) {
         return PERMISSION_DENIED;
     }
 
-    int hours = 0;
+    double hours = 0;
+    int time_window = 0;
+    uint64_t threshold = 0;
+    bool force_report = false;
     for (size_t i = 0; i < args.size(); i++) {
         const auto& arg = args[i];
         if (arg == String16("--hours")) {
             if (++i >= args.size())
                 break;
-            hours = stoi(String16::std_string(args[i]));
+            hours = stod(String16::std_string(args[i]));
+            continue;
+        }
+        if (arg == String16("--time_window")) {
+            if (++i >= args.size())
+                break;
+            time_window = stoi(String16::std_string(args[i]));
+            continue;
+        }
+        if (arg == String16("--threshold")) {
+            if (++i >= args.size())
+                break;
+            threshold = stoll(String16::std_string(args[i]));
+            continue;
+        }
+        if (arg == String16("--force")) {
+            force_report = true;
             continue;
         }
     }
 
-    const std::vector<struct uid_event>& events = storaged.get_uid_events(hours);
-    for (const auto& event : events) {
-        dprintf(fd, "%llu %s %llu %llu %llu %llu\n",
-            (unsigned long long)event.ts,
-            event.name.c_str(),
-            (unsigned long long)event.fg_read_bytes,
-            (unsigned long long)event.fg_write_bytes,
-            (unsigned long long)event.bg_read_bytes,
-            (unsigned long long)event.bg_write_bytes);
+    const std::map<uint64_t, std::vector<struct uid_record>>& records =
+                storaged.get_uid_records(hours, threshold, force_report);
+    for (const auto& it : records) {
+        dprintf(fd, "%llu\n", (unsigned long long)it.first);
+        for (const auto& record : it.second) {
+            dprintf(fd, "%s %llu %llu %llu %llu %llu %llu %llu %llu\n",
+                record.name.c_str(),
+                (unsigned long long)record.ios.bytes[READ][FOREGROUND][CHARGER_OFF],
+                (unsigned long long)record.ios.bytes[WRITE][FOREGROUND][CHARGER_OFF],
+                (unsigned long long)record.ios.bytes[READ][BACKGROUND][CHARGER_OFF],
+                (unsigned long long)record.ios.bytes[WRITE][BACKGROUND][CHARGER_OFF],
+                (unsigned long long)record.ios.bytes[READ][FOREGROUND][CHARGER_ON],
+                (unsigned long long)record.ios.bytes[WRITE][FOREGROUND][CHARGER_ON],
+                (unsigned long long)record.ios.bytes[READ][BACKGROUND][CHARGER_ON],
+                (unsigned long long)record.ios.bytes[WRITE][BACKGROUND][CHARGER_ON]);
+        }
     }
+
+    if (time_window) {
+        storaged.update_uid_io_interval(time_window);
+    }
+
     return NO_ERROR;
 }
-
 
 sp<IStoraged> get_storaged_service() {
     sp<IServiceManager> sm = defaultServiceManager();

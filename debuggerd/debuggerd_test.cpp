@@ -40,10 +40,10 @@ using namespace std::chrono_literals;
 using android::base::unique_fd;
 
 #if defined(__LP64__)
-#define CRASHER_PATH  "/system/xbin/crasher64"
+#define CRASHER_PATH  "/system/bin/crasher64"
 #define ARCH_SUFFIX "64"
 #else
-#define CRASHER_PATH "/system/xbin/crasher"
+#define CRASHER_PATH "/system/bin/crasher"
 #define ARCH_SUFFIX ""
 #endif
 
@@ -192,7 +192,7 @@ void CrasherTest::StartCrasher(const std::string& crash_type) {
   std::string type = "wait-" + crash_type;
   StartProcess([type]() {
     execl(CRASHER_PATH, CRASHER_PATH, type.c_str(), nullptr);
-    err(1, "exec failed");
+    exit(errno);
   });
 }
 
@@ -216,7 +216,9 @@ void CrasherTest::AssertDeath(int signo) {
     FAIL() << "failed to wait for crasher: " << strerror(errno);
   }
 
-  if (!WIFSIGNALED(status)) {
+  if (WIFEXITED(status)) {
+    FAIL() << "crasher failed to exec: " << strerror(WEXITSTATUS(status));
+  } else if (!WIFSIGNALED(status)) {
     FAIL() << "crasher didn't terminate via a signal";
   }
   ASSERT_EQ(signo, WTERMSIG(status));
@@ -404,4 +406,36 @@ TEST_F(CrasherTest, PR_SET_DUMPABLE_0_raise) {
     raise(SIGUSR1);
   });
   AssertDeath(SIGUSR1);
+}
+
+TEST(crash_dump, zombie) {
+  pid_t forkpid = fork();
+
+  int pipefd[2];
+  ASSERT_EQ(0, pipe2(pipefd, O_CLOEXEC));
+
+  pid_t rc;
+  int status;
+
+  if (forkpid == 0) {
+    errno = 0;
+    rc = waitpid(-1, &status, WNOHANG | __WALL | __WNOTHREAD);
+    if (rc != -1 || errno != ECHILD) {
+      errx(2, "first waitpid returned %d (%s), expected failure with ECHILD", rc, strerror(errno));
+    }
+
+    raise(DEBUGGER_SIGNAL);
+
+    errno = 0;
+    rc = waitpid(-1, &status, __WALL | __WNOTHREAD);
+    if (rc != -1 || errno != ECHILD) {
+      errx(2, "second waitpid returned %d (%s), expected failure with ECHILD", rc, strerror(errno));
+    }
+    _exit(0);
+  } else {
+    rc = waitpid(forkpid, &status, 0);
+    ASSERT_EQ(forkpid, rc);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(0, WEXITSTATUS(status));
+  }
 }

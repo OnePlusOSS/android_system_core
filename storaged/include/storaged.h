@@ -26,7 +26,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include <batteryservice/IBatteryPropertiesListener.h>
+
 #include "storaged_uid_monitor.h"
+
+using namespace android;
 
 #define FRIEND_TEST(test_case_name, test_name) \
 friend class test_case_name##_##test_name##_Test
@@ -253,6 +257,7 @@ public:
 #define DEFAULT_PERIODIC_CHORES_INTERVAL_DISK_STATS_PUBLISH ( 3600 )
 #define DEFAULT_PERIODIC_CHORES_INTERVAL_EMMC_INFO_PUBLISH ( 86400 )
 #define DEFAULT_PERIODIC_CHORES_INTERVAL_UID_IO ( 3600 )
+#define DEFAULT_PERIODIC_CHORES_INTERVAL_UID_IO_LIMIT (300)
 
 // UID IO threshold in bytes
 #define DEFAULT_PERIODIC_CHORES_UID_IO_THRESHOLD ( 1024 * 1024 * 1024ULL )
@@ -268,7 +273,7 @@ struct storaged_config {
     int event_time_check_usec;  // check how much cputime spent in event loop
 };
 
-class storaged_t {
+class storaged_t : public BnBatteryPropertiesListener {
 private:
     time_t mTimer;
     storaged_config mConfig;
@@ -294,11 +299,20 @@ public:
     }
 
     std::unordered_map<uint32_t, struct uid_info> get_uids(void) {
-        return mUidm.get_uids();
+        return mUidm.get_uid_io_stats();
     }
-    std::vector<struct uid_event> get_uid_events(int hours) {
-        return mUidm.dump_events(hours);
+    std::map<uint64_t, std::vector<struct uid_record>> get_uid_records(
+            double hours, uint64_t threshold, bool force_report) {
+        return mUidm.dump(hours, threshold, force_report);
     }
+    void update_uid_io_interval(int interval) {
+        if (interval >= DEFAULT_PERIODIC_CHORES_INTERVAL_UID_IO_LIMIT) {
+            mConfig.periodic_chores_interval_uid_io = interval;
+        }
+    }
+
+    void init_battery_service();
+    virtual void batteryPropertiesChanged(struct BatteryProperties props);
 };
 
 // Eventlog tag
