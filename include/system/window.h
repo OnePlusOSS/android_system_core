@@ -353,9 +353,11 @@ enum {
     NATIVE_WINDOW_SET_SURFACE_DAMAGE        = 20,   /* private */
     NATIVE_WINDOW_SET_SHARED_BUFFER_MODE    = 21,
     NATIVE_WINDOW_SET_AUTO_REFRESH          = 22,
-    NATIVE_WINDOW_ENABLE_FRAME_TIMESTAMPS   = 23,
-    NATIVE_WINDOW_GET_FRAME_TIMESTAMPS      = 24,
-    NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION= 25,
+    NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION= 23,
+    NATIVE_WINDOW_GET_NEXT_FRAME_ID         = 24,
+    NATIVE_WINDOW_ENABLE_FRAME_TIMESTAMPS   = 25,
+    NATIVE_WINDOW_GET_COMPOSITOR_TIMING     = 26,
+    NATIVE_WINDOW_GET_FRAME_TIMESTAMPS      = 27,
 };
 
 /* parameter for NATIVE_WINDOW_[API_][DIS]CONNECT */
@@ -1018,6 +1020,20 @@ static inline int native_window_set_auto_refresh(
     return window->perform(window, NATIVE_WINDOW_SET_AUTO_REFRESH, autoRefresh);
 }
 
+static inline int native_window_get_refresh_cycle_duration(
+        struct ANativeWindow* window,
+        int64_t* outRefreshDuration)
+{
+    return window->perform(window, NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION,
+            outRefreshDuration);
+}
+
+static inline int native_window_get_next_frame_id(
+        struct ANativeWindow* window, uint64_t* frameId)
+{
+    return window->perform(window, NATIVE_WINDOW_GET_NEXT_FRAME_ID, frameId);
+}
+
 static inline int native_window_enable_frame_timestamps(
         struct ANativeWindow* window, bool enable)
 {
@@ -1025,27 +1041,28 @@ static inline int native_window_enable_frame_timestamps(
             enable);
 }
 
+static inline int native_window_get_compositor_timing(
+        struct ANativeWindow* window,
+        int64_t* compositeDeadline, int64_t* compositeInterval,
+        int64_t* compositeToPresentLatency)
+{
+    return window->perform(window, NATIVE_WINDOW_GET_COMPOSITOR_TIMING,
+            compositeDeadline, compositeInterval, compositeToPresentLatency);
+}
+
 static inline int native_window_get_frame_timestamps(
-        struct ANativeWindow* window, uint32_t framesAgo,
+        struct ANativeWindow* window, uint64_t frameId,
         int64_t* outRequestedPresentTime, int64_t* outAcquireTime,
         int64_t* outLatchTime, int64_t* outFirstRefreshStartTime,
-        int64_t* outLastRefreshStartTime, int64_t* outGlCompositionDoneTime,
+        int64_t* outLastRefreshStartTime, int64_t* outGpuCompositionDoneTime,
         int64_t* outDisplayPresentTime, int64_t* outDisplayRetireTime,
         int64_t* outDequeueReadyTime, int64_t* outReleaseTime)
 {
     return window->perform(window, NATIVE_WINDOW_GET_FRAME_TIMESTAMPS,
-            framesAgo, outRequestedPresentTime, outAcquireTime, outLatchTime,
+            frameId, outRequestedPresentTime, outAcquireTime, outLatchTime,
             outFirstRefreshStartTime, outLastRefreshStartTime,
-            outGlCompositionDoneTime, outDisplayPresentTime,
+            outGpuCompositionDoneTime, outDisplayPresentTime,
             outDisplayRetireTime, outDequeueReadyTime, outReleaseTime);
-}
-
-static inline int native_window_get_refresh_cycle_duration(
-        struct ANativeWindow* window,
-        int64_t* outRefreshDuration)
-{
-    return window->perform(window, NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION,
-            outRefreshDuration);
 }
 
 
