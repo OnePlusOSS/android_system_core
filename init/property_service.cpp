@@ -41,6 +41,7 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <private/android_filesystem_config.h>
 
 #include <selinux/selinux.h>
@@ -468,6 +469,22 @@ static void load_override_properties() {
     }
 }
 
+static int check_rlim_action() {
+    std::string value ;
+    struct rlimit rl;
+    value = property_get("persist.debug.trace");
+    const char* pval = value.c_str();
+
+    if((strcmp(pval,"1") == 0)) {
+        rl.rlim_cur = RLIM_INFINITY;
+        rl.rlim_max = RLIM_INFINITY;
+        if (setrlimit(RLIMIT_CORE, &rl) < 0) {
+            ERROR("could not enable core file generation");
+        }
+    }
+    return 0;
+}
+
 /* When booting an encrypted system, /data is not mounted when the
  * property service is started, so any properties stored there are
  * not loaded.  Vold triggers init to load these properties once it
@@ -477,6 +494,8 @@ void load_persist_props(void) {
     load_override_properties();
     /* Read persistent properties after all default values have been loaded. */
     load_persistent_properties();
+    /*check for coredump*/
+    check_rlim_action();
 }
 
 void load_recovery_id_prop() {
