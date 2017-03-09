@@ -91,7 +91,12 @@ enum {
     CAMERA_MSG_VENDOR_START = 0x1000,
     CAMERA_MSG_STATS_DATA = CAMERA_MSG_VENDOR_START,
     CAMERA_MSG_META_DATA = 0x2000,
-    CAMERA_MSG_VENDOR_END = 0x8000,
+//    CAMERA_MSG_VENDOR_END = 0x8000,
+    CAMERA_MSG_AEC = 0x4000,                      // notifyCallback
+    CAMERA_MSG_DNG_IMAGE = 0x8000,
+    CAMERA_MSG_DNG_META_DATA = 0x10000,
+    CAMERA_MSG_IN_PROCESSING = 0x20000,
+    CAMERA_MSG_MOTION_VECTOR = 0x40000,
     CAMERA_MSG_ALL_MSGS = 0xFFFF
 };
 
@@ -306,6 +311,7 @@ typedef struct camera_face {
     int32_t mouth[2];
     int32_t smile_degree;
     int32_t smile_score;
+    int32_t is_smile;
     int32_t blink_detected;
     int32_t face_recognised;
     int32_t gaze_angle;
