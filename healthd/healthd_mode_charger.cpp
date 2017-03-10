@@ -174,6 +174,7 @@ static struct android::BatteryProperties *batt_prop;
 static int char_width;
 static int char_height;
 static bool minui_inited;
+#define CHAGRE_VOL_PATH        "/sys/class/power_supply/battery/charge_now"
 
 /* current time in milliseconds */
 static int64_t curr_time_ms(void)
@@ -187,6 +188,31 @@ static void clear_screen(void)
 {
     gr_color(0, 0, 0, 255);
     gr_clear();
+}
+static int readLine(const char* path, char* buf, size_t size)
+{
+    if (!path)
+        return -1;
+    int fd = open(path, O_RDONLY, 0);
+    if (fd == -1) {
+        ALOGE("Could not open '%s'", path);
+        return -1;
+    }
+    memset(buf, 0, size);
+    size_t count = read(fd, buf, size);
+
+    if (count > 0) {
+        count = (count < size) ? count : (size - 1);
+        while ((count > 0) && (buf[count-1] == '\n')){
+            count--;
+        }
+        buf[count] = 0 ;
+    } else {
+        buf[0] = 0;
+    }
+
+    close(fd);
+    return count;
 }
 
 #define MAX_KLOG_WRITE_BUF_SZ 256
@@ -625,11 +651,18 @@ void healthd_mode_charger_heartbeat()
 void healthd_mode_charger_battery_update(
     struct android::BatteryProperties *props)
 {
+    const int SIZE = 128;
+    char buf[SIZE];
+    int gChagreVoltage;
     struct charger *charger = &charger_state;
 
     charger->charger_connected =
         props->chargerAcOnline || props->chargerUsbOnline ||
         props->chargerWirelessOnline;
+    if (readLine(CHAGRE_VOL_PATH, buf, SIZE) > 0) {
+        gChagreVoltage = strtol(buf, NULL, 0);
+    }
+    charger->charger_connected = charger->charger_connected || gChagreVoltage > 2500;
 
     if (!charger->have_battery_state) {
         charger->have_battery_state = true;
