@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Android Open Source Project
+ * Copyright (C) 2012-2017 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -294,6 +294,49 @@ static int device_is_force_encrypted() {
 }
 
 /*
+ * Tries to check if filesystem is clean.
+ * partition is appointed by argument data_path.
+ *
+ * property sys.crash.detect indicates filesystem is not clean(if true)
+ */
+static void check_fs_clean(char *data_path, char *fs_type)
+{
+    char super_buf[1024];
+    struct ext4_super_block *sb;
+    int fd;
+
+    if (!strcmp(fs_type, "ext2") || !strcmp(fs_type, "ext3") || !strcmp(fs_type, "ext4")) {
+        fd = open(data_path, O_RDONLY);
+        if (fd < 0) {
+             ERROR("open %s failed\n", data_path);
+             return;
+        }
+
+        if (TEMP_FAILURE_RETRY(lseek(fd, 1024, SEEK_SET)) < 0 ||
+             TEMP_FAILURE_RETRY(read(fd, super_buf, 1024)) != 1024) {
+             ERROR("read super block failed\n");
+        } else {
+             sb = (struct ext4_super_block *)super_buf;
+
+             if (sb->s_magic != EXT4_SUPER_MAGIC) {
+                 ERROR("from super block, it is not ext{234}\n");
+                 close(fd);
+                 return;
+             }
+
+             if (sb->s_feature_incompat & cpu_to_le32(EXT4_FEATURE_INCOMPAT_RECOVER)) {
+                 INFO("Unclean fs\n");
+                 property_set("sys.crash.detect", "true");
+             } else {
+                 property_set("sys.crash.detect", "false");
+             }
+        }
+        close(fd);
+    }
+}
+
+
+/*
  * Tries to mount any of the consecutive fstab entries that match
  * the mountpoint of the one given by fstab->recs[start_idx].
  *
@@ -331,6 +374,13 @@ static int mount_with_alternatives(struct fstab *fstab, int start_idx, int *end_
                 ERROR("%s(): skipping fstab dup mountpoint=%s rec[%d].fs_type=%s already mounted as %s.\n", __func__,
                      fstab->recs[i].mount_point, i, fstab->recs[i].fs_type, fstab->recs[*attempted_idx].fs_type);
                 continue;
+            }
+
+            /* do filesystem clean check */
+            if (!strcmp(fstab->recs[i].mount_point, "/data") &&
+                         fstab->recs[i].fs_mgr_flags & MF_CRASHCHECK) {
+                check_fs_clean(fstab->recs[i].blk_device,
+                                          fstab->recs[i].fs_type);
             }
 
             if (fstab->recs[i].fs_mgr_flags & MF_CHECK) {
@@ -764,6 +814,21 @@ int fs_mgr_do_mount(struct fstab *fstab, char *n_name, char *n_blk_device,
         /* First check the filesystem if requested */
         if (fstab->recs[i].fs_mgr_flags & MF_WAIT) {
             wait_for_file(n_blk_device, WAIT_TIMEOUT);
+        }
+
+        char encrypt_data_partition[1024];
+
+        /* do filesystem check after crypto device created but before mount it */
+        if (!strcmp(fstab->recs[i].mount_point, "/data") &&
+                               fstab->recs[i].fs_mgr_flags & MF_CRASHCHECK) {
+            property_get("ro.crypto.fs_crypto_blkdev", encrypt_data_partition, "");
+            INFO("data_partition=%s\n", encrypt_data_partition);
+
+            if (strcmp(encrypt_data_partition, "")) {
+                check_fs_clean(encrypt_data_partition, fstab->recs[i].fs_type);
+            } else {
+                INFO("crypto device not created!\n");
+            }
         }
 
         if (fstab->recs[i].fs_mgr_flags & MF_CHECK) {
