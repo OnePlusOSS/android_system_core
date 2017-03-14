@@ -43,6 +43,7 @@
 #include <android-base/file.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <android-base/unique_fd.h>
 #include <cutils/fs.h>
 #include <cutils/iosched_policy.h>
 #include <cutils/list.h>
@@ -52,6 +53,8 @@
 
 #include <fstream>
 #include <memory>
+#include <set>
+#include <vector>
 
 #include "action.h"
 #include "bootchart.h"
@@ -502,26 +505,30 @@ static bool is_dt_compatible() {
     std::string dt_value;
     std::string file_name = StringPrintf("%s/compatible", android_dt_dir);
 
-    android::base::ReadFileToString(file_name, &dt_value);
-    if (!dt_value.compare("android,firmware")) {
-        LOG(ERROR) << "firmware/android is not compatible with 'android,firmware'";
-        return false;
+    if (android::base::ReadFileToString(file_name, &dt_value)) {
+        // trim the trailing '\0' out, otherwise the comparison
+        // will produce false-negatives.
+        dt_value.resize(dt_value.size() - 1);
+        if (dt_value == "android,firmware") {
+            return true;
+        }
     }
 
-    return true;
+    return false;
 }
 
 static bool is_dt_fstab_compatible() {
     std::string dt_value;
     std::string file_name = StringPrintf("%s/%s/compatible", android_dt_dir, "fstab");
 
-    android::base::ReadFileToString(file_name, &dt_value);
-    if (!dt_value.compare("android,fstab")) {
-        LOG(ERROR) << "firmware/android/fstab is not compatible with 'android,fstab'";
-        return false;
+    if (android::base::ReadFileToString(file_name, &dt_value)) {
+        dt_value.resize(dt_value.size() - 1);
+        if (dt_value == "android,fstab") {
+            return true;
+        }
     }
 
-    return true;
+    return false;
 }
 
 static void process_kernel_dt() {
@@ -612,6 +619,248 @@ static int audit_callback(void *data, security_class_t /*cls*/, char *buf, size_
     return 0;
 }
 
+/*
+ * Forks, executes the provided program in the child, and waits for the completion in the parent.
+ * Child's stderr is captured and logged using LOG(ERROR).
+ *
+ * Returns true if the child exited with status code 0, returns false otherwise.
+ */
+static bool fork_execve_and_wait_for_completion(const char* filename, char* const argv[],
+                                                char* const envp[]) {
+    // Create a pipe used for redirecting child process's output.
+    // * pipe_fds[0] is the FD the parent will use for reading.
+    // * pipe_fds[1] is the FD the child will use for writing.
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == -1) {
+        PLOG(ERROR) << "Failed to create pipe";
+        return false;
+    }
+
+    pid_t child_pid = fork();
+    if (child_pid == -1) {
+        PLOG(ERROR) << "Failed to fork for " << filename;
+        return false;
+    }
+
+    if (child_pid == 0) {
+        // fork succeeded -- this is executing in the child process
+
+        // Close the pipe FD not used by this process
+        TEMP_FAILURE_RETRY(close(pipe_fds[0]));
+
+        // Redirect stderr to the pipe FD provided by the parent
+        if (TEMP_FAILURE_RETRY(dup2(pipe_fds[1], STDERR_FILENO)) == -1) {
+            PLOG(ERROR) << "Failed to redirect stderr of " << filename;
+            _exit(127);
+            return false;
+        }
+        TEMP_FAILURE_RETRY(close(pipe_fds[1]));
+
+        if (execve(filename, argv, envp) == -1) {
+            PLOG(ERROR) << "Failed to execve " << filename;
+            return false;
+        }
+        // Unreachable because execve will have succeeded and replaced this code
+        // with child process's code.
+        _exit(127);
+        return false;
+    } else {
+        // fork succeeded -- this is executing in the original/parent process
+
+        // Close the pipe FD not used by this process
+        TEMP_FAILURE_RETRY(close(pipe_fds[1]));
+
+        // Log the redirected output of the child process.
+        // It's unfortunate that there's no standard way to obtain an istream for a file descriptor.
+        // As a result, we're buffering all output and logging it in one go at the end of the
+        // invocation, instead of logging it as it comes in.
+        const int child_out_fd = pipe_fds[0];
+        std::string child_output;
+        if (!android::base::ReadFdToString(child_out_fd, &child_output)) {
+            PLOG(ERROR) << "Failed to capture full output of " << filename;
+        }
+        TEMP_FAILURE_RETRY(close(child_out_fd));
+        if (!child_output.empty()) {
+            // Log captured output, line by line, because LOG expects to be invoked for each line
+            std::istringstream in(child_output);
+            std::string line;
+            while (std::getline(in, line)) {
+                LOG(ERROR) << filename << ": " << line;
+            }
+        }
+
+        // Wait for child to terminate
+        int status;
+        if (TEMP_FAILURE_RETRY(waitpid(child_pid, &status, 0)) != child_pid) {
+            PLOG(ERROR) << "Failed to wait for " << filename;
+            return false;
+        }
+
+        if (WIFEXITED(status)) {
+            int status_code = WEXITSTATUS(status);
+            if (status_code == 0) {
+                return true;
+            } else {
+                LOG(ERROR) << filename << " exited with status " << status_code;
+            }
+        } else if (WIFSIGNALED(status)) {
+            LOG(ERROR) << filename << " killed by signal " << WTERMSIG(status);
+        } else if (WIFSTOPPED(status)) {
+            LOG(ERROR) << filename << " stopped by signal " << WSTOPSIG(status);
+        } else {
+            LOG(ERROR) << "waitpid for " << filename << " returned unexpected status: " << status;
+        }
+
+        return false;
+    }
+}
+
+static bool read_first_line(const char* file, std::string* line) {
+    line->clear();
+
+    std::string contents;
+    if (!android::base::ReadFileToString(file, &contents, true /* follow symlinks */)) {
+        return false;
+    }
+    std::istringstream in(contents);
+    std::getline(in, *line);
+    return true;
+}
+
+static bool selinux_find_precompiled_split_policy(std::string* file) {
+    file->clear();
+
+    static constexpr const char precompiled_sepolicy[] = "/vendor/etc/selinux/precompiled_sepolicy";
+    if (access(precompiled_sepolicy, R_OK) == -1) {
+        return false;
+    }
+    std::string actual_plat_id;
+    if (!read_first_line("/system/etc/selinux/plat_sepolicy.cil.sha256", &actual_plat_id)) {
+        PLOG(INFO) << "Failed to read /system/etc/selinux/plat_sepolicy.cil.sha256";
+        return false;
+    }
+    std::string precompiled_plat_id;
+    if (!read_first_line("/vendor/etc/selinux/precompiled_sepolicy.plat.sha256",
+                         &precompiled_plat_id)) {
+        PLOG(INFO) << "Failed to read /vendor/etc/selinux/precompiled_sepolicy.plat.sha256";
+        return false;
+    }
+    if ((actual_plat_id.empty()) || (actual_plat_id != precompiled_plat_id)) {
+        return false;
+    }
+
+    *file = precompiled_sepolicy;
+    return true;
+}
+
+static constexpr const char plat_policy_cil_file[] = "/system/etc/selinux/plat_sepolicy.cil";
+
+static bool selinux_is_split_policy_device() { return access(plat_policy_cil_file, R_OK) != -1; }
+
+/*
+ * Loads SELinux policy split across platform/system and non-platform/vendor files.
+ *
+ * Returns true upon success, false otherwise (failure cause is logged).
+ */
+static bool selinux_load_split_policy() {
+    // IMPLEMENTATION NOTE: Split policy consists of three CIL files:
+    // * platform -- policy needed due to logic contained in the system image,
+    // * non-platform -- policy needed due to logic contained in the vendor image,
+    // * mapping -- mapping policy which helps preserve forward-compatibility of non-platform policy
+    //   with newer versions of platform policy.
+    //
+    // secilc is invoked to compile the above three policy files into a single monolithic policy
+    // file. This file is then loaded into the kernel.
+
+    // Load precompiled policy from vendor image, if a matching policy is found there. The policy
+    // must match the platform policy on the system image.
+    std::string precompiled_sepolicy_file;
+    if (selinux_find_precompiled_split_policy(&precompiled_sepolicy_file)) {
+        android::base::unique_fd fd(
+            open(precompiled_sepolicy_file.c_str(), O_RDONLY | O_CLOEXEC | O_BINARY));
+        if (fd != -1) {
+            if (selinux_android_load_policy_from_fd(fd, precompiled_sepolicy_file.c_str()) < 0) {
+                LOG(ERROR) << "Failed to load SELinux policy from " << precompiled_sepolicy_file;
+                return false;
+            }
+            return true;
+        }
+    }
+    // No suitable precompiled policy could be loaded
+
+    LOG(INFO) << "Compiling SELinux policy";
+
+    // Determine the highest policy language version supported by the kernel
+    set_selinuxmnt("/sys/fs/selinux");
+    int max_policy_version = security_policyvers();
+    if (max_policy_version == -1) {
+        PLOG(ERROR) << "Failed to determine highest policy version supported by kernel";
+        return false;
+    }
+
+    // We store the output of the compilation on /dev because this is the most convenient tmpfs
+    // storage mount available this early in the boot sequence.
+    char compiled_sepolicy[] = "/dev/sepolicy.XXXXXX";
+    android::base::unique_fd compiled_sepolicy_fd(mkostemp(compiled_sepolicy, O_CLOEXEC));
+    if (compiled_sepolicy_fd < 0) {
+        PLOG(ERROR) << "Failed to create temporary file " << compiled_sepolicy;
+        return false;
+    }
+
+    // clang-format off
+    const char* compile_args[] = {
+        "/system/bin/secilc",
+        plat_policy_cil_file,
+        "-M", "true",
+        // Target the highest policy language version supported by the kernel
+        "-c", std::to_string(max_policy_version).c_str(),
+        "/vendor/etc/selinux/mapping_sepolicy.cil",
+        "/vendor/etc/selinux/nonplat_sepolicy.cil",
+        "-o", compiled_sepolicy,
+        // We don't care about file_contexts output by the compiler
+        "-f", "/sys/fs/selinux/null",  // /dev/null is not yet available
+        nullptr};
+    // clang-format on
+
+    if (!fork_execve_and_wait_for_completion(compile_args[0], (char**)compile_args, (char**)ENV)) {
+        unlink(compiled_sepolicy);
+        return false;
+    }
+    unlink(compiled_sepolicy);
+
+    LOG(INFO) << "Loading compiled SELinux policy";
+    if (selinux_android_load_policy_from_fd(compiled_sepolicy_fd, compiled_sepolicy) < 0) {
+        LOG(ERROR) << "Failed to load SELinux policy from " << compiled_sepolicy;
+        return false;
+    }
+
+    return true;
+}
+
+/*
+ * Loads SELinux policy from a monolithic file.
+ *
+ * Returns true upon success, false otherwise (failure cause is logged).
+ */
+static bool selinux_load_monolithic_policy() {
+    LOG(VERBOSE) << "Loading SELinux policy from monolithic file";
+    if (selinux_android_load_policy() < 0) {
+        PLOG(ERROR) << "Failed to load monolithic SELinux policy";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Loads SELinux policy into the kernel.
+ *
+ * Returns true upon success, false otherwise (failure cause is logged).
+ */
+static bool selinux_load_policy() {
+    return selinux_is_split_policy_device() ? selinux_load_split_policy()
+                                            : selinux_load_monolithic_policy();
+}
+
 static void selinux_initialize(bool in_kernel_domain) {
     Timer t;
 
@@ -622,10 +871,9 @@ static void selinux_initialize(bool in_kernel_domain) {
     selinux_set_callback(SELINUX_CB_AUDIT, cb);
 
     if (in_kernel_domain) {
-        LOG(INFO) << "Loading SELinux policy...";
-        if (selinux_android_load_policy() < 0) {
-            PLOG(ERROR) << "failed to load policy";
-            security_failure();
+        LOG(INFO) << "Loading SELinux policy";
+        if (!selinux_load_policy()) {
+            panic();
         }
 
         bool kernel_enforcing = (security_getenforce() == 1);
@@ -664,120 +912,47 @@ static void set_usb_controller() {
     }
 }
 
-static std::string import_dt_fstab() {
-    std::string fstab;
-    if (!is_dt_compatible() || !is_dt_fstab_compatible()) {
-        return fstab;
+static bool early_mount_one(struct fstab_rec* rec) {
+    if (rec && fs_mgr_is_verified(rec)) {
+        // setup verity and create the dm-XX block device
+        // needed to mount this partition
+        int ret = fs_mgr_setup_verity(rec, false);
+        if (ret == FS_MGR_SETUP_VERITY_FAIL) {
+            PLOG(ERROR) << "early_mount: Failed to setup verity for '" << rec->mount_point << "'";
+            return false;
+        }
+
+        // The exact block device name is added as a mount source by
+        // fs_mgr_setup_verity() in ->blk_device as "/dev/block/dm-XX"
+        // We create that device by running coldboot on /sys/block/dm-XX
+        std::string dm_device(basename(rec->blk_device));
+        std::string syspath = StringPrintf("/sys/block/%s", dm_device.c_str());
+        device_init(syspath.c_str(), [&](uevent* uevent) -> coldboot_action_t {
+            if (uevent->device_name && !strcmp(dm_device.c_str(), uevent->device_name)) {
+                LOG(VERBOSE) << "early_mount: creating dm-verity device : " << dm_device;
+                return COLDBOOT_STOP;
+            }
+            return COLDBOOT_CONTINUE;
+        });
     }
 
-    std::string fstabdir_name = StringPrintf("%s/fstab", android_dt_dir);
-    std::unique_ptr<DIR, int (*)(DIR*)> fstabdir(opendir(fstabdir_name.c_str()), closedir);
-    if (!fstabdir) return fstab;
-
-    dirent* dp;
-    while ((dp = readdir(fstabdir.get())) != NULL) {
-        // skip over name and compatible
-        if (dp->d_type != DT_DIR) {
-            continue;
-        }
-
-        // skip if its not 'vendor', 'odm' or 'system'
-        if (strcmp(dp->d_name, "odm") && strcmp(dp->d_name, "system") &&
-            strcmp(dp->d_name, "vendor")) {
-            continue;
-        }
-
-        // create <dev> <mnt_point>  <type>  <mnt_flags>  <fsmgr_flags>\n
-        std::vector<std::string> fstab_entry;
-        std::string file_name;
-        std::string value;
-        file_name = StringPrintf("%s/%s/dev", fstabdir_name.c_str(), dp->d_name);
-        if (!android::base::ReadFileToString(file_name, &value)) {
-            LOG(ERROR) << "dt_fstab: Failed to find device for partition " << dp->d_name;
-            fstab.clear();
-            break;
-        }
-        // trim the terminating '\0' out
-        value.resize(value.size() - 1);
-        fstab_entry.push_back(value);
-        fstab_entry.push_back(StringPrintf("/%s", dp->d_name));
-
-        file_name = StringPrintf("%s/%s/type", fstabdir_name.c_str(), dp->d_name);
-        if (!android::base::ReadFileToString(file_name, &value)) {
-            LOG(ERROR) << "dt_fstab: Failed to find type for partition " << dp->d_name;
-            fstab.clear();
-            break;
-        }
-        value.resize(value.size() - 1);
-        fstab_entry.push_back(value);
-
-        file_name = StringPrintf("%s/%s/mnt_flags", fstabdir_name.c_str(), dp->d_name);
-        if (!android::base::ReadFileToString(file_name, &value)) {
-            LOG(ERROR) << "dt_fstab: Failed to find type for partition " << dp->d_name;
-            fstab.clear();
-            break;
-        }
-        value.resize(value.size() - 1);
-        fstab_entry.push_back(value);
-
-        file_name = StringPrintf("%s/%s/fsmgr_flags", fstabdir_name.c_str(), dp->d_name);
-        if (!android::base::ReadFileToString(file_name, &value)) {
-            LOG(ERROR) << "dt_fstab: Failed to find type for partition " << dp->d_name;
-            fstab.clear();
-            break;
-        }
-        value.resize(value.size() - 1);
-        fstab_entry.push_back(value);
-
-        fstab += android::base::Join(fstab_entry, " ");
-        fstab += '\n';
+    if (rec && fs_mgr_do_mount_one(rec)) {
+        PLOG(ERROR) << "early_mount: Failed to mount '" << rec->mount_point << "'";
+        return false;
     }
 
-    return fstab;
+    return true;
 }
 
-/* Early mount vendor and ODM partitions. The fstab is read from device-tree. */
-static bool early_mount() {
-    std::string fstab = import_dt_fstab();
-    if (fstab.empty()) {
-        LOG(INFO) << "Early mount skipped (missing fstab in device tree)";
-        return true;
+// Creates devices with uevent->partition_name matching one in the in/out
+// partition_names. Note that the partition_names MUST have A/B suffix
+// when A/B is used. Found partitions will then be removed from the
+// partition_names for caller to check which devices are NOT created.
+static void early_device_init(std::set<std::string>* partition_names) {
+    if (partition_names->empty()) {
+        return;
     }
-
-    std::unique_ptr<FILE, decltype(&fclose)> fstab_file(
-        fmemopen(static_cast<void*>(const_cast<char*>(fstab.c_str())), fstab.length(), "r"), fclose);
-    if (!fstab_file) {
-        PLOG(ERROR) << "Early mount failed to open fstab file in memory";
-        return false;
-    }
-
-    std::unique_ptr<struct fstab, decltype(&fs_mgr_free_fstab)> tab(
-        fs_mgr_read_fstab_file(fstab_file.get()), fs_mgr_free_fstab);
-    if (!tab) {
-        LOG(ERROR) << "Early mount fsmgr failed to load fstab from kernel:" << std::endl << fstab;
-        return false;
-    }
-
-    // find out fstab records for odm, system and vendor
-    fstab_rec* odm_rec = fs_mgr_get_entry_for_mount_point(tab.get(), "/odm");
-    fstab_rec* system_rec = fs_mgr_get_entry_for_mount_point(tab.get(), "/system");
-    fstab_rec* vendor_rec = fs_mgr_get_entry_for_mount_point(tab.get(), "/vendor");
-    if (!odm_rec && !system_rec && !vendor_rec) {
-        // nothing to early mount
-        return true;
-    }
-
-    // assume A/B device if we find 'slotselect' in any fstab entry
-    bool is_ab = ((odm_rec && fs_mgr_is_slotselect(odm_rec)) ||
-                  (system_rec && fs_mgr_is_slotselect(system_rec)) ||
-                  (vendor_rec && fs_mgr_is_slotselect(vendor_rec)));
-    bool found_odm = !odm_rec;
-    bool found_system = !system_rec;
-    bool found_vendor = !vendor_rec;
-    int count_odm = 0, count_vendor = 0, count_system = 0;
-
-    // create the devices we need..
-    device_init(nullptr, [&](uevent* uevent) -> coldboot_action_t {
+    device_init(nullptr, [=](uevent* uevent) -> coldboot_action_t {
         if (!strncmp(uevent->subsystem, "firmware", 8)) {
             return COLDBOOT_CONTINUE;
         }
@@ -792,80 +967,136 @@ static bool early_mount() {
             return COLDBOOT_CONTINUE;
         }
 
-        coldboot_action_t ret;
-        bool create_this_node = false;
         if (uevent->partition_name) {
-            // prefix match partition names so we create device nodes for
-            // A/B-ed partitions
-            if (!found_odm && !strncmp(uevent->partition_name, "odm", 3)) {
-                LOG(VERBOSE) << "early_mount: found (" << uevent->partition_name << ") partition";
-
-                // wait twice for A/B-ed partitions
-                count_odm++;
-                if (!is_ab) {
-                    found_odm = true;
-                } else if (count_odm == 2) {
-                    found_odm = true;
+            // match partition names to create device nodes for partitions
+            // both partition_names and uevent->partition_name have A/B suffix when A/B is used
+            auto iter = partition_names->find(uevent->partition_name);
+            if (iter != partition_names->end()) {
+                LOG(VERBOSE) << "early_mount: found partition: " << *iter;
+                partition_names->erase(iter);
+                if (partition_names->empty()) {
+                    return COLDBOOT_STOP;  // found all partitions, stop coldboot
+                } else {
+                    return COLDBOOT_CREATE;  // create this device and continue to find others
                 }
-
-                create_this_node = true;
-            } else if (!found_system && !strncmp(uevent->partition_name, "system", 6)) {
-                LOG(VERBOSE) << "early_mount: found (" << uevent->partition_name << ") partition";
-
-                count_system++;
-                if (!is_ab) {
-                    found_system = true;
-                } else if (count_system == 2) {
-                    found_system = true;
-                }
-
-                create_this_node = true;
-            } else if (!found_vendor && !strncmp(uevent->partition_name, "vendor", 6)) {
-                LOG(VERBOSE) << "early_mount: found (" << uevent->partition_name << ") partition";
-                count_vendor++;
-                if (!is_ab) {
-                    found_vendor = true;
-                } else if (count_vendor == 2) {
-                    found_vendor = true;
-                }
-
-                create_this_node = true;
             }
         }
-
-        // if we found all other partitions already, create this
-        // node and stop coldboot. If this is a prefix matched
-        // partition, create device node and continue. For everything
-        // else skip the device node
-        if (found_odm && found_system && found_vendor) {
-            ret = COLDBOOT_STOP;
-        } else if (create_this_node) {
-            ret = COLDBOOT_CREATE;
-        } else {
-            ret = COLDBOOT_CONTINUE;
-        }
-
-        return ret;
+        // Not found a partition or find an unneeded partition, continue to find others
+        return COLDBOOT_CONTINUE;
     });
+}
 
-    // TODO: add support to mount partitions w/ verity
+static bool get_early_partitions(const std::vector<fstab_rec*>& early_fstab_recs,
+                                 std::set<std::string>* out_partitions, bool* out_need_verity) {
+    std::string meta_partition;
+    out_partitions->clear();
+    *out_need_verity = false;
 
-    int ret = 0;
-    if (odm_rec &&
-        (ret = fs_mgr_do_mount(tab.get(), odm_rec->mount_point, odm_rec->blk_device, NULL))) {
-        PLOG(ERROR) << "early_mount: fs_mgr_do_mount returned error for mounting odm";
-        return false;
+    for (auto fstab_rec : early_fstab_recs) {
+        // don't allow verifyatboot for early mounted partitions
+        if (fs_mgr_is_verifyatboot(fstab_rec)) {
+            LOG(ERROR) << "early_mount: partitions can't be verified at boot";
+            return false;
+        }
+        // check for verified partitions
+        if (fs_mgr_is_verified(fstab_rec)) {
+            *out_need_verity = true;
+        }
+        // check if verity metadata is on a separate partition and get partition
+        // name from the end of the ->verity_loc path. verity state is not partition
+        // specific, so there must be only 1 additional partition that carries
+        // verity state.
+        if (fstab_rec->verity_loc) {
+            if (!meta_partition.empty()) {
+                LOG(ERROR) << "early_mount: more than one meta partition found: " << meta_partition
+                           << ", " << basename(fstab_rec->verity_loc);
+                return false;
+            } else {
+                meta_partition = basename(fstab_rec->verity_loc);
+            }
+        }
     }
 
-    if (vendor_rec &&
-        (ret = fs_mgr_do_mount(tab.get(), vendor_rec->mount_point, vendor_rec->blk_device, NULL))) {
-        PLOG(ERROR) << "early_mount: fs_mgr_do_mount returned error for mounting vendor";
-        return false;
+    // includes those early mount partitions and meta_partition (if any)
+    // note that fstab_rec->blk_device has A/B suffix updated by fs_mgr when A/B is used
+    for (auto fstab_rec : early_fstab_recs) {
+        out_partitions->emplace(basename(fstab_rec->blk_device));
     }
 
-    device_close();
+    if (!meta_partition.empty()) {
+        out_partitions->emplace(std::move(meta_partition));
+    }
 
     return true;
+}
+
+/* Early mount vendor and ODM partitions. The fstab is read from device-tree. */
+static bool early_mount() {
+    // skip early mount if we're in recovery mode
+    if (access("/sbin/recovery", F_OK) == 0) {
+        LOG(INFO) << "Early mount skipped (recovery mode)";
+        return true;
+    }
+
+    // first check if device tree fstab entries are compatible
+    if (!is_dt_fstab_compatible()) {
+        LOG(INFO) << "Early mount skipped (missing/incompatible fstab in device tree)";
+        return true;
+    }
+
+    std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)> tab(
+        fs_mgr_read_fstab_dt(), fs_mgr_free_fstab);
+    if (!tab) {
+        LOG(ERROR) << "Early mount failed to read fstab from device tree";
+        return false;
+    }
+
+    // find out fstab records for odm, system and vendor
+    std::vector<fstab_rec*> early_fstab_recs;
+    for (auto mount_point : {"/odm", "/system", "/vendor"}) {
+        fstab_rec* fstab_rec = fs_mgr_get_entry_for_mount_point(tab.get(), mount_point);
+        if (fstab_rec != nullptr) {
+            early_fstab_recs.push_back(fstab_rec);
+        }
+    }
+
+    // nothing to early mount
+    if (early_fstab_recs.empty()) return true;
+
+    bool need_verity;
+    std::set<std::string> partition_names;
+    // partition_names MUST have A/B suffix when A/B is used
+    if (!get_early_partitions(early_fstab_recs, &partition_names, &need_verity)) {
+        return false;
+    }
+
+    bool success = false;
+    // create the devices we need..
+    early_device_init(&partition_names);
+
+    // early_device_init will remove found partitions from partition_names
+    // So if the partition_names is not empty here, means some partitions
+    // are not found
+    if (!partition_names.empty()) {
+        LOG(ERROR) << "early_mount: partition(s) not found: "
+                   << android::base::Join(partition_names, ", ");
+        goto done;
+    }
+
+    if (need_verity) {
+        // create /dev/device mapper
+        device_init("/sys/devices/virtual/misc/device-mapper",
+                    [&](uevent* uevent) -> coldboot_action_t { return COLDBOOT_STOP; });
+    }
+
+    for (auto fstab_rec : early_fstab_recs) {
+        if (!early_mount_one(fstab_rec)) goto done;
+    }
+    success = true;
+
+done:
+    device_close();
+    return success;
 }
 
 int main(int argc, char** argv) {
@@ -1011,8 +1242,16 @@ int main(int argc, char** argv) {
     std::string bootscript = property_get("ro.boot.init_rc");
     if (bootscript.empty()) {
         parser.ParseConfig("/init.rc");
+        parser.set_is_system_etc_init_loaded(
+                parser.ParseConfig("/system/etc/init"));
+        parser.set_is_vendor_etc_init_loaded(
+                parser.ParseConfig("/vendor/etc/init"));
+        parser.set_is_odm_etc_init_loaded(parser.ParseConfig("/odm/etc/init"));
     } else {
         parser.ParseConfig(bootscript);
+        parser.set_is_system_etc_init_loaded(true);
+        parser.set_is_vendor_etc_init_loaded(true);
+        parser.set_is_odm_etc_init_loaded(true);
     }
 
     ActionManager& am = ActionManager::GetInstance();

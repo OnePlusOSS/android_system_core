@@ -317,6 +317,12 @@ enum {
      * retire info, 0 if it won't.
      */
     NATIVE_WINDOW_FRAME_TIMESTAMPS_SUPPORTS_RETIRE = 18,
+
+    /*
+     * Returns 1 if the native window is valid, 0 otherwise. native window is valid
+     * if it is safe (i.e. no crash will occur) to call any method on it.
+     */
+    NATIVE_WINDOW_IS_VALID = 19,
 };
 
 /* Valid operations for the (*perform)() hook.
@@ -330,6 +336,7 @@ enum {
  * ANativeWindow.
  */
 enum {
+// clang-format off
     NATIVE_WINDOW_SET_USAGE                 =  0,
     NATIVE_WINDOW_CONNECT                   =  1,   /* deprecated */
     NATIVE_WINDOW_DISCONNECT                =  2,   /* deprecated */
@@ -358,6 +365,9 @@ enum {
     NATIVE_WINDOW_ENABLE_FRAME_TIMESTAMPS   = 25,
     NATIVE_WINDOW_GET_COMPOSITOR_TIMING     = 26,
     NATIVE_WINDOW_GET_FRAME_TIMESTAMPS      = 27,
+    NATIVE_WINDOW_GET_WIDE_COLOR_SUPPORT    = 28,
+    NATIVE_WINDOW_GET_HDR_SUPPORT           = 29,
+// clang-format on
 };
 
 /* parameter for NATIVE_WINDOW_[API_][DIS]CONNECT */
@@ -1065,6 +1075,16 @@ static inline int native_window_get_frame_timestamps(
             outDisplayRetireTime, outDequeueReadyTime, outReleaseTime);
 }
 
+static inline int native_window_get_wide_color_support(
+    struct ANativeWindow* window, bool* outSupport) {
+  return window->perform(window, NATIVE_WINDOW_GET_WIDE_COLOR_SUPPORT,
+                         outSupport);
+}
+
+static inline int native_window_get_hdr_support(struct ANativeWindow* window,
+                                                bool* outSupport) {
+  return window->perform(window, NATIVE_WINDOW_GET_HDR_SUPPORT, outSupport);
+}
 
 __END_DECLS
 

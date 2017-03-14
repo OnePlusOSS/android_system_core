@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2016 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,9 @@
  * limitations under the License.
  */
 
-#include <sys/cdefs.h>
+#ifndef _ADB_MDNS_H_
+#define _ADB_MDNS_H_
 
-#define FS_MGR_SETUP_VERITY_DISABLED (-2)
-#define FS_MGR_SETUP_VERITY_FAIL (-1)
-#define FS_MGR_SETUP_VERITY_SUCCESS 0
+const char* kADBServiceType = "_adb._tcp";
 
-__BEGIN_DECLS
-
-int fs_mgr_setup_verity(struct fstab_rec *fstab, bool verify_dev);
-
-__END_DECLS
+#endif

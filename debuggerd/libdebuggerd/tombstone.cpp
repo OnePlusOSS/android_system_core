@@ -214,7 +214,8 @@ static void dump_probable_cause(log_t* log, const siginfo_t& si) {
       cause = "call to kuser_cmpxchg64";
     }
   } else if (si.si_signo == SIGSYS && si.si_code == SYS_SECCOMP) {
-    cause = StringPrintf("seccomp prevented call to disallowed system call %d", si.si_syscall);
+    cause = StringPrintf("seccomp prevented call to disallowed %s system call %d",
+                         ABI_STRING, si.si_syscall);
   }
 
   if (!cause.empty()) _LOG(log, logtype::HEADER, "Cause: %s\n", cause.c_str());
@@ -750,8 +751,11 @@ void engrave_tombstone(int tombstone_fd, BacktraceMap* map,
   dump_crash(&log, map, open_files, pid, tid, siblings, abort_msg_address);
 }
 
-void engrave_tombstone_ucontext(int tombstone_fd, pid_t pid, pid_t tid, uintptr_t abort_msg_address,
-                                siginfo_t* siginfo, ucontext_t* ucontext) {
+void engrave_tombstone_ucontext(int tombstone_fd, uintptr_t abort_msg_address, siginfo_t* siginfo,
+                                ucontext_t* ucontext) {
+  pid_t pid = getpid();
+  pid_t tid = gettid();
+
   log_t log;
   log.current_tid = tid;
   log.crashed_tid = tid;

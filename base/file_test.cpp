@@ -159,6 +159,26 @@ TEST(file, Readlink) {
 #endif
 }
 
+TEST(file, GetExecutableDirectory) {
+  std::string path = android::base::GetExecutableDirectory();
+  ASSERT_NE("", path);
+  ASSERT_NE(android::base::GetExecutablePath(), path);
+  ASSERT_EQ('/', path[0]);
+  ASSERT_NE('/', path[path.size() - 1]);
+}
+
 TEST(file, GetExecutablePath) {
   ASSERT_NE("", android::base::GetExecutablePath());
+}
+
+TEST(file, Basename) {
+  EXPECT_EQ("sh", android::base::Basename("/system/bin/sh"));
+  EXPECT_EQ("sh", android::base::Basename("sh"));
+  EXPECT_EQ("sh", android::base::Basename("/system/bin/sh/"));
+}
+
+TEST(file, Dirname) {
+  EXPECT_EQ("/system/bin", android::base::Dirname("/system/bin/sh"));
+  EXPECT_EQ(".", android::base::Dirname("sh"));
+  EXPECT_EQ("/system/bin", android::base::Dirname("/system/bin/sh/"));
 }

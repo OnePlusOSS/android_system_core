@@ -244,6 +244,10 @@ on init
     # set RLIMIT_NICE to allow priorities from 19 to -20
     setrlimit 13 40 40
 
+    # This allows the ledtrig-transient properties to be created here so
+    # that they can be chown'd to system:system later on boot
+    write /sys/class/leds/vibrator/trigger "transient"
+
 # Healthd can trigger a full boot from charger mode by signaling this
 # property when the power button is held.
 on property:sys.boot_from_charger_mode=1
@@ -289,6 +293,9 @@ on late-init
     # Now we can mount /data. File encryption requires keymaster to decrypt
     # /data, which in turn can only be loaded when system properties are present.
     trigger post-fs-data
+
+    # Now we can start zygote for devices with file based encryption
+    trigger zygote-start
 
     # Load persist properties and override properties (if enabled) from /data.
     trigger load_persist_props_action
@@ -409,6 +416,7 @@ on post-fs-data
     mkdir /data/misc/profiles/cur 0771 system system
     mkdir /data/misc/profiles/ref 0771 system system
     mkdir /data/misc/profman 0770 system shell
+    mkdir /data/misc/gcov 0770 root root
 
     # For security reasons, /data/local/tmp should always be empty.
     # Do not place files or directories in /data/local/tmp
@@ -490,6 +498,13 @@ on post-fs-data
     # Set indication (checked by vold) that we have finished this action
     #setprop vold.post_fs_data_done 1
 
+# This trigger will be triggered before 'zygote-start' since there is no zygote-start defined in
+# current init.rc. It is recommended to put unnecessary data/ initialization from post-fs-data
+# to start-zygote to unblock zygote start.
+on zygote-start && property:ro.crypto.state=encrypted && property:ro.crypto.type=file
+   start netd
+   start zygote
+
 on boot
     # basic network init
     ifup lo
@@ -553,6 +568,11 @@ on boot
     chown system system /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
     chmod 0660 /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
 
+    chown system system /sys/class/leds/vibrator/trigger
+    chown system system /sys/class/leds/vibrator/activate
+    chown system system /sys/class/leds/vibrator/brightness
+    chown system system /sys/class/leds/vibrator/duration
+    chown system system /sys/class/leds/vibrator/state
     chown system system /sys/class/timed_output/vibrator/enable
     chown system system /sys/class/leds/keyboard-backlight/brightness
     chown system system /sys/class/leds/lcd-backlight/brightness
@@ -564,7 +584,6 @@ on boot
     chown system system /sys/class/leds/red/device/grpfreq
     chown system system /sys/class/leds/red/device/grppwm
     chown system system /sys/class/leds/red/device/blink
-    chown system system /sys/class/timed_output/vibrator/enable
     chown system system /sys/module/sco/parameters/disable_esco
     chown system system /sys/kernel/ipv4/tcp_wmem_min
     chown system system /sys/kernel/ipv4/tcp_wmem_def

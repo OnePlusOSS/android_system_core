@@ -25,7 +25,8 @@ LOCAL_SRC_FILES:= \
     fs_mgr_slotselect.cpp \
     fs_mgr_verity.cpp \
     fs_mgr_avb.cpp \
-    fs_mgr_avb_ops.cpp
+    fs_mgr_avb_ops.cpp \
+    fs_mgr_boot_config.cpp
 LOCAL_C_INCLUDES := \
     $(LOCAL_PATH)/include \
     system/vold \
@@ -36,6 +37,9 @@ LOCAL_EXPORT_C_INCLUDE_DIRS := $(LOCAL_PATH)/include
 LOCAL_CFLAGS := -Werror
 ifneq (,$(filter userdebug,$(TARGET_BUILD_VARIANT)))
 LOCAL_CFLAGS += -DALLOW_ADBD_DISABLE_VERITY=1
+endif
+ifneq (,$(filter eng,$(TARGET_BUILD_VARIANT)))
+LOCAL_CFLAGS += -DALLOW_SKIP_SECURE_CHECK=1
 endif
 include $(BUILD_STATIC_LIBRARY)
 

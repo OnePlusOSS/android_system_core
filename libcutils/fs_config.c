@@ -149,10 +149,6 @@ static const struct fs_path_config android_files[] = {
                                               "system/bin/run-as" },
     { 00700, AID_SYSTEM,    AID_SHELL,     CAP_MASK_LONG(CAP_BLOCK_SUSPEND),
                                               "system/bin/inputflinger" },
-    { 00750, AID_SYSTEM,    AID_SHELL,     CAP_MASK_LONG(CAP_SETUID) |
-                                           CAP_MASK_LONG(CAP_SETGID) |
-                                           CAP_MASK_LONG(CAP_SYS_PTRACE),
-                                              "system/bin/storaged" },
 
     /* Support FIFO scheduling mode in SurfaceFlinger. */
     { 00755, AID_SYSTEM,    AID_GRAPHICS,  CAP_MASK_LONG(CAP_SYS_NICE),
@@ -161,7 +157,7 @@ static const struct fs_path_config android_files[] = {
     /* Support hostapd administering a network interface. */
     { 00755, AID_WIFI,      AID_WIFI,      CAP_MASK_LONG(CAP_NET_ADMIN) |
                                            CAP_MASK_LONG(CAP_NET_RAW),
-                                              "system/bin/hostapd" },
+                                              "vendor/bin/hostapd" },
 
     /* Support wifi_hal_legacy administering a network interface. */
     { 00755, AID_WIFI,      AID_WIFI,      CAP_MASK_LONG(CAP_NET_ADMIN) |
@@ -170,7 +166,7 @@ static const struct fs_path_config android_files[] = {
 
     /* Support Bluetooth legacy hal accessing /sys/class/rfkill */
     { 00700, AID_BLUETOOTH, AID_BLUETOOTH, CAP_MASK_LONG(CAP_NET_ADMIN),
-                                              "system/bin/hw/android.hardware.bluetooth@1.0-service" },
+                                              "vendor/bin/hw/android.hardware.bluetooth@1.0-service" },
 
     /* A non-privileged zygote that spawns isolated processes for web rendering. */
     { 0750,  AID_ROOT,      AID_ROOT,      CAP_MASK_LONG(CAP_SETUID) |
@@ -185,6 +181,7 @@ static const struct fs_path_config android_files[] = {
     { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/crash_dump32" },
     { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/crash_dump64" },
     { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/debuggerd" },
+    { 00700, AID_ROOT,      AID_ROOT,      0, "system/bin/secilc" },
     { 00750, AID_ROOT,      AID_ROOT,      0, "system/bin/uncrypt" },
     { 00750, AID_ROOT,      AID_ROOT,      0, "system/bin/install-recovery.sh" },
     { 00755, AID_ROOT,      AID_SHELL,     0, "system/bin/*" },

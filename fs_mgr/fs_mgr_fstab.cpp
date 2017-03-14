@@ -15,12 +15,17 @@
  */
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <unistd.h>
+
+#include <android-base/file.h>
+#include <android-base/stringprintf.h>
+#include <android-base/strings.h>
 
 #include "fs_mgr_priv.h"
 
@@ -165,6 +170,24 @@ static uint64_t parse_size(const char *arg)
         size *= 1024LL * 1024LL * 1024LL;
 
     return size;
+}
+
+/* fills 'dt_value' with the underlying device tree value string without
+ * the trailing '\0'. Returns true if 'dt_value' has a valid string, 'false'
+ * otherwise.
+ */
+static bool read_dt_file(const std::string& file_name, std::string* dt_value)
+{
+    if (android::base::ReadFileToString(file_name, dt_value)) {
+        if (!dt_value->empty()) {
+            // trim the trailing '\0' out, otherwise the comparison
+            // will produce false-negatives.
+            dt_value->resize(dt_value->size() - 1);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static int parse_flags(char *flags, struct flag_list *fl,
@@ -335,7 +358,98 @@ static int parse_flags(char *flags, struct flag_list *fl,
     return f;
 }
 
-struct fstab *fs_mgr_read_fstab_file(FILE *fstab_file)
+static bool is_dt_fstab_compatible() {
+    std::string dt_value;
+    std::string file_name = kAndroidDtDir + "/fstab/compatible";
+    if (read_dt_file(file_name, &dt_value)) {
+        if (dt_value == "android,fstab") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static std::string read_fstab_from_dt() {
+    std::string fstab;
+    if (!is_dt_compatible() || !is_dt_fstab_compatible()) {
+        return fstab;
+    }
+
+    std::string fstabdir_name = kAndroidDtDir + "/fstab";
+    std::unique_ptr<DIR, int (*)(DIR*)> fstabdir(opendir(fstabdir_name.c_str()), closedir);
+    if (!fstabdir) return fstab;
+
+    dirent* dp;
+    while ((dp = readdir(fstabdir.get())) != NULL) {
+        // skip over name and compatible
+        if (dp->d_type != DT_DIR) {
+            continue;
+        }
+
+        // skip if its not 'vendor', 'odm' or 'system'
+        if (strcmp(dp->d_name, "odm") && strcmp(dp->d_name, "system") &&
+            strcmp(dp->d_name, "vendor")) {
+            continue;
+        }
+
+        // create <dev> <mnt_point>  <type>  <mnt_flags>  <fsmgr_flags>\n
+        std::vector<std::string> fstab_entry;
+        std::string file_name;
+        std::string value;
+        file_name = android::base::StringPrintf("%s/%s/dev", fstabdir_name.c_str(), dp->d_name);
+        if (!read_dt_file(file_name, &value)) {
+            LERROR << "dt_fstab: Failed to find device for partition " << dp->d_name;
+            fstab.clear();
+            break;
+        }
+        fstab_entry.push_back(value);
+        fstab_entry.push_back(android::base::StringPrintf("/%s", dp->d_name));
+
+        file_name = android::base::StringPrintf("%s/%s/type", fstabdir_name.c_str(), dp->d_name);
+        if (!read_dt_file(file_name, &value)) {
+            LERROR << "dt_fstab: Failed to find type for partition " << dp->d_name;
+            fstab.clear();
+            break;
+        }
+        fstab_entry.push_back(value);
+
+        file_name = android::base::StringPrintf("%s/%s/mnt_flags", fstabdir_name.c_str(), dp->d_name);
+        if (!read_dt_file(file_name, &value)) {
+            LERROR << "dt_fstab: Failed to find type for partition " << dp->d_name;
+            fstab.clear();
+            break;
+        }
+        fstab_entry.push_back(value);
+
+        file_name = android::base::StringPrintf("%s/%s/fsmgr_flags", fstabdir_name.c_str(), dp->d_name);
+        if (!read_dt_file(file_name, &value)) {
+            LERROR << "dt_fstab: Failed to find type for partition " << dp->d_name;
+            fstab.clear();
+            break;
+        }
+        fstab_entry.push_back(value);
+
+        fstab += android::base::Join(fstab_entry, " ");
+        fstab += '\n';
+    }
+
+    return fstab;
+}
+
+bool is_dt_compatible() {
+    std::string file_name = kAndroidDtDir + "/compatible";
+    std::string dt_value;
+    if (read_dt_file(file_name, &dt_value)) {
+        if (dt_value == "android,firmware") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static struct fstab *fs_mgr_read_fstab_file(FILE *fstab_file)
 {
     int cnt, entries;
     ssize_t len;
@@ -472,6 +586,41 @@ err:
     return NULL;
 }
 
+/* merges fstab entries from both a and b, then returns the merged result.
+ * note that the caller should only manage the return pointer without
+ * doing further memory management for the two inputs, i.e. only need to
+ * frees up memory of the return value without touching a and b. */
+static struct fstab *in_place_merge(struct fstab *a, struct fstab *b)
+{
+    if (!a) return b;
+    if (!b) return a;
+
+    int total_entries = a->num_entries + b->num_entries;
+    a->recs = static_cast<struct fstab_rec *>(realloc(
+        a->recs, total_entries * (sizeof(struct fstab_rec))));
+    if (!a->recs) {
+        LERROR << __FUNCTION__ << "(): failed to allocate fstab recs";
+        // If realloc() fails the original block is left untouched;
+        // it is not freed or moved. So we have to free both a and b here.
+        fs_mgr_free_fstab(a);
+        fs_mgr_free_fstab(b);
+        return nullptr;
+    }
+
+    for (int i = a->num_entries, j = 0; i < total_entries; i++, j++) {
+        // copy the pointer directly *without* malloc and memcpy
+        a->recs[i] = b->recs[j];
+    }
+
+    // Frees up b, but don't free b->recs[X] to make sure they are
+    // accessible through a->recs[X].
+    free(b->fstab_filename);
+    free(b);
+
+    a->num_entries = total_entries;
+    return a;
+}
+
 struct fstab *fs_mgr_read_fstab(const char *fstab_path)
 {
     FILE *fstab_file;
@@ -479,15 +628,80 @@ struct fstab *fs_mgr_read_fstab(const char *fstab_path)
 
     fstab_file = fopen(fstab_path, "r");
     if (!fstab_file) {
-        LERROR << "Cannot open file " << fstab_path;
-        return NULL;
+        PERROR << __FUNCTION__<< "(): cannot open file: '" << fstab_path << "'";
+        return nullptr;
     }
+
     fstab = fs_mgr_read_fstab_file(fstab_file);
     if (fstab) {
         fstab->fstab_filename = strdup(fstab_path);
+    } else {
+        LERROR << __FUNCTION__ << "(): failed to load fstab from : '" << fstab_path << "'";
     }
+
     fclose(fstab_file);
     return fstab;
+}
+
+/* Returns fstab entries parsed from the device tree if they
+ * exist
+ */
+struct fstab *fs_mgr_read_fstab_dt()
+{
+    std::string fstab_buf = read_fstab_from_dt();
+    if (fstab_buf.empty()) {
+        LERROR << __FUNCTION__ << "(): failed to read fstab from dt";
+        return nullptr;
+    }
+
+    std::unique_ptr<FILE, decltype(&fclose)> fstab_file(
+        fmemopen(static_cast<void*>(const_cast<char*>(fstab_buf.c_str())),
+                 fstab_buf.length(), "r"), fclose);
+    if (!fstab_file) {
+        PERROR << __FUNCTION__ << "(): failed to create a file stream for fstab dt";
+        return nullptr;
+    }
+
+    struct fstab *fstab = fs_mgr_read_fstab_file(fstab_file.get());
+    if (!fstab) {
+        LERROR << __FUNCTION__ << "(): failed to load fstab from kernel:"
+               << std::endl << fstab_buf;
+    }
+
+    return fstab;
+}
+
+/* combines fstab entries passed in from device tree with
+ * the ones found from fstab_path
+ */
+struct fstab *fs_mgr_read_fstab_with_dt(const char *fstab_path)
+{
+    struct fstab *fstab_dt = fs_mgr_read_fstab_dt();
+    struct fstab *fstab = fs_mgr_read_fstab(fstab_path);
+
+    return in_place_merge(fstab_dt, fstab);
+}
+
+/*
+ * tries to load default fstab.<hardware> file from /odm/etc, /vendor/etc
+ * or /. loads the first one found and also combines fstab entries passed
+ * in from device tree.
+ */
+struct fstab *fs_mgr_read_fstab_default()
+{
+    std::string hw;
+    std::string default_fstab;
+
+    if (fs_mgr_get_boot_config("hardware", &hw)) {
+        for (const char *prefix : {"/odm/etc/fstab.","/vendor/etc/fstab.", "/fstab."}) {
+            default_fstab = prefix + hw;
+            if (access(default_fstab.c_str(), F_OK) == 0) break;
+        }
+    } else {
+        LWARNING << __FUNCTION__ << "(): failed to find device hardware name";
+    }
+
+    return fs_mgr_read_fstab_with_dt(default_fstab.c_str());
 }
 
 void fs_mgr_free_fstab(struct fstab *fstab)
@@ -601,6 +815,11 @@ int fs_mgr_is_nonremovable(const struct fstab_rec *fstab)
 int fs_mgr_is_verified(const struct fstab_rec *fstab)
 {
     return fstab->fs_mgr_flags & MF_VERIFY;
+}
+
+int fs_mgr_is_verifyatboot(const struct fstab_rec *fstab)
+{
+    return fstab->fs_mgr_flags & MF_VERIFYATBOOT;
 }
 
 int fs_mgr_is_encryptable(const struct fstab_rec *fstab)

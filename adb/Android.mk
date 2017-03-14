@@ -144,6 +144,7 @@ LOCAL_CFLAGS_darwin := $(LIBADB_darwin_CFLAGS)
 LOCAL_SRC_FILES := \
     $(LIBADB_SRC_FILES) \
     adb_auth_host.cpp \
+    transport_mdns.cpp \
 
 LOCAL_SRC_FILES_darwin := $(LIBADB_darwin_SRC_FILES)
 LOCAL_SRC_FILES_linux := $(LIBADB_linux_SRC_FILES)
@@ -153,7 +154,7 @@ LOCAL_SANITIZE := $(adb_host_sanitize)
 
 # Even though we're building a static library (and thus there's no link step for
 # this to take effect), this adds the includes to our path.
-LOCAL_STATIC_LIBRARIES := libcrypto_utils libcrypto libbase
+LOCAL_STATIC_LIBRARIES := libcrypto_utils libcrypto libbase libmdnssd
 LOCAL_STATIC_LIBRARIES_linux := libusb
 LOCAL_STATIC_LIBRARIES_darwin := libusb
 
@@ -175,7 +176,7 @@ LOCAL_SRC_FILES := \
     shell_service_test.cpp \
 
 LOCAL_SANITIZE := $(adb_target_sanitize)
-LOCAL_STATIC_LIBRARIES := libadbd libcrypto_utils libcrypto libusb
+LOCAL_STATIC_LIBRARIES := libadbd libcrypto_utils libcrypto libusb libmdnssd
 LOCAL_SHARED_LIBRARIES := liblog libbase libcutils
 include $(BUILD_NATIVE_TEST)
 
@@ -216,14 +217,15 @@ LOCAL_SRC_FILES_linux := $(LIBADB_TEST_linux_SRCS)
 LOCAL_SRC_FILES_darwin := $(LIBADB_TEST_darwin_SRCS)
 LOCAL_SRC_FILES_windows := $(LIBADB_TEST_windows_SRCS)
 LOCAL_SANITIZE := $(adb_host_sanitize)
+LOCAL_SHARED_LIBRARIES := libbase
 LOCAL_STATIC_LIBRARIES := \
     libadb \
-    libbase \
     libcrypto_utils \
     libcrypto \
     libcutils \
     libdiagnose_usb \
-    libgmock_host \
+    libmdnssd \
+    libgmock_host
 
 LOCAL_STATIC_LIBRARIES_linux := libusb
 LOCAL_STATIC_LIBRARIES_darwin := libusb
@@ -232,7 +234,7 @@ LOCAL_STATIC_LIBRARIES_darwin := libusb
 LOCAL_LDFLAGS_windows := -municode
 LOCAL_LDLIBS_linux := -lrt -ldl -lpthread
 LOCAL_LDLIBS_darwin := -framework CoreFoundation -framework IOKit -lobjc
-LOCAL_LDLIBS_windows := -lws2_32 -luserenv -static -lwinpthread
+LOCAL_LDLIBS_windows := -lws2_32 -luserenv
 LOCAL_STATIC_LIBRARIES_windows := AdbWinApi
 
 LOCAL_MULTILIB := first
@@ -249,7 +251,7 @@ LOCAL_LDLIBS_darwin := -lpthread -framework CoreFoundation -framework IOKit -fra
 
 # Use wmain instead of main
 LOCAL_LDFLAGS_windows := -municode
-LOCAL_LDLIBS_windows := -lws2_32 -lgdi32 -static -lwinpthread
+LOCAL_LDLIBS_windows := -lws2_32 -lgdi32
 LOCAL_STATIC_LIBRARIES_windows := AdbWinApi
 LOCAL_REQUIRED_MODULES_windows := AdbWinApi AdbWinUsbApi
 
@@ -291,6 +293,7 @@ LOCAL_STATIC_LIBRARIES := \
     libcrypto \
     libdiagnose_usb \
     liblog \
+    libmdnssd
 
 # Don't use libcutils on Windows.
 LOCAL_STATIC_LIBRARIES_darwin := libcutils
@@ -324,6 +327,7 @@ LOCAL_CLANG := true
 
 LOCAL_SRC_FILES := \
     daemon/main.cpp \
+    daemon/mdns.cpp \
     services.cpp \
     file_sync_service.cpp \
     framebuffer_service.cpp \
@@ -370,6 +374,7 @@ LOCAL_STATIC_LIBRARIES := \
     libcrypto_utils \
     libcrypto \
     libminijail \
+    libmdnssd \
     libdebuggerd_handler \
 
 include $(BUILD_EXECUTABLE)

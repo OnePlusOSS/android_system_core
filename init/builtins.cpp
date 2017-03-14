@@ -476,15 +476,18 @@ exit_success:
 static void import_late(const std::vector<std::string>& args, size_t start_index, size_t end_index) {
     Parser& parser = Parser::GetInstance();
     if (end_index <= start_index) {
-        // Use the default set if no path is given
-        static const std::vector<std::string> init_directories = {
-            "/system/etc/init",
-            "/vendor/etc/init",
-            "/odm/etc/init"
-        };
-
-        for (const auto& dir : init_directories) {
-            parser.ParseConfig(dir);
+        // Fallbacks for partitions on which early mount isn't enabled.
+        if (!parser.is_system_etc_init_loaded()) {
+            parser.ParseConfig("/system/etc/init");
+            parser.set_is_system_etc_init_loaded(true);
+        }
+        if (!parser.is_vendor_etc_init_loaded()) {
+            parser.ParseConfig("/vendor/etc/init");
+            parser.set_is_vendor_etc_init_loaded(true);
+        }
+        if (!parser.is_odm_etc_init_loaded()) {
+            parser.ParseConfig("/odm/etc/init");
+            parser.set_is_odm_etc_init_loaded(true);
         }
     } else {
         for (size_t i = start_index; i < end_index; ++i) {
@@ -601,20 +604,27 @@ static int do_mount_all(const std::vector<std::string>& args) {
     int mount_mode = MOUNT_MODE_DEFAULT;
     const char* fstabfile = args[1].c_str();
     std::size_t path_arg_end = args.size();
+    const char* prop_post_fix = "default";
 
     for (na = args.size() - 1; na > 1; --na) {
         if (args[na] == "--early") {
             path_arg_end = na;
             queue_event = false;
             mount_mode = MOUNT_MODE_EARLY;
+            prop_post_fix = "early";
         } else if (args[na] == "--late") {
             path_arg_end = na;
             import_rc = false;
             mount_mode = MOUNT_MODE_LATE;
+            prop_post_fix = "late";
         }
     }
 
+    std::string prop_name = android::base::StringPrintf("ro.boottime.init.mount_all.%s",
+                                                        prop_post_fix);
+    Timer t;
     int ret =  mount_fstab(fstabfile, mount_mode);
+    property_set(prop_name.c_str(), std::to_string(t.duration_ms()).c_str());
 
     if (import_rc) {
         /* Paths of .rc files are specified at the 2nd argument and beyond */
