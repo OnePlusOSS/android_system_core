@@ -42,7 +42,10 @@
 #include <private/android_logger.h>
 
 #ifndef TEST_PREFIX
-#ifdef __ANDROID__  // make sure we always run code if compiled for android
+#ifdef TEST_LOGGER
+#define TEST_PREFIX android_set_log_transport(TEST_LOGGER);
+// make sure we always run code despite overrides if compiled for android
+#elif defined(__ANDROID__)
 #define TEST_PREFIX
 #endif
 #endif
@@ -169,6 +172,9 @@ static bool tested__android_log_close;
 
 TEST(liblog, __android_log_btwrite__android_logger_list_read) {
 #if (defined(__ANDROID__) || defined(USING_LOGGER_LOCAL))
+#ifdef TEST_PREFIX
+  TEST_PREFIX
+#endif
   struct logger_list* logger_list;
 
   pid_t pid = getpid();
@@ -1775,7 +1781,14 @@ TEST(liblog, enoent) {
   // liblog.android_logger_get_ is one of those tests that has no recourse
   // and that would be adversely affected by emptying the log if it was run
   // right after this test.
-  system("stop logd");
+  if (getuid() != AID_ROOT) {
+    fprintf(
+        stderr,
+        "WARNING: test conditions request being run as root and not AID=%d\n",
+        getuid());
+  }
+
+  system((getuid() == AID_ROOT) ? "stop logd" : "su 0 stop logd");
   usleep(1000000);
 
   // A clean stop like we are testing returns -ENOENT, but in the _real_
@@ -1786,20 +1799,20 @@ TEST(liblog, enoent) {
   int ret = __android_log_btwrite(0, EVENT_TYPE_LONG, &ts, sizeof(ts));
   std::string content = android::base::StringPrintf(
       "__android_log_btwrite(0, EVENT_TYPE_LONG, &ts, sizeof(ts)) = %d %s\n",
-      ret, strerror(-ret));
+      ret, (ret <= 0) ? strerror(-ret) : "(content sent)");
   EXPECT_TRUE(
       IsOk((ret == -ENOENT) || (ret == -ENOTCONN) || (ret == -ECONNREFUSED),
            content));
   ret = __android_log_btwrite(0, EVENT_TYPE_LONG, &ts, sizeof(ts));
   content = android::base::StringPrintf(
       "__android_log_btwrite(0, EVENT_TYPE_LONG, &ts, sizeof(ts)) = %d %s\n",
-      ret, strerror(-ret));
+      ret, (ret <= 0) ? strerror(-ret) : "(content sent)");
   EXPECT_TRUE(
       IsOk((ret == -ENOENT) || (ret == -ENOTCONN) || (ret == -ECONNREFUSED),
            content));
   EXPECT_EQ(0, count_matching_ts(ts));
 
-  system("start logd");
+  system((getuid() == AID_ROOT) ? "start logd" : "su 0 start logd");
   usleep(1000000);
 
   EXPECT_EQ(0, count_matching_ts(ts));
@@ -1828,14 +1841,24 @@ TEST(liblog, __security) {
   char persist[PROP_VALUE_MAX];
   char readonly[PROP_VALUE_MAX];
 
+  // First part of this test requires the test itself to have the appropriate
+  // permissions. If we do not have them, we can not override them, so we
+  // bail rather than give a failing grade.
   property_get(persist_key, persist, "");
+  fprintf(stderr, "INFO: getprop %s -> %s\n", persist_key, persist);
   property_get(readonly_key, readonly, nothing_val);
+  fprintf(stderr, "INFO: getprop %s -> %s\n", readonly_key, readonly);
 
   if (!strcmp(readonly, nothing_val)) {
     EXPECT_FALSE(__android_log_security());
-    fprintf(stderr, "Warning, setting ro.device_owner to a domain\n");
-    property_set(readonly_key, "com.google.android.SecOps.DeviceOwner");
+    fprintf(stderr, "WARNING: setting ro.device_owner to a domain\n");
+    static const char domain[] = "com.google.android.SecOps.DeviceOwner";
+    property_set(readonly_key, domain);
+    usleep(20000);  // property system does not guarantee performance, rest ...
+    property_get(readonly_key, readonly, nothing_val);
+    EXPECT_STREQ(readonly, domain);
   } else if (!strcasecmp(readonly, "false") || !readonly[0]) {
+    // not enough permissions to run
     EXPECT_FALSE(__android_log_security());
     return;
   }
@@ -2117,10 +2140,19 @@ static void android_errorWriteWithInfoLog_helper(int TAG, const char* SUBTAG,
 }
 #endif
 
+// Make multiple tests and re-tests orthogonal to prevent falsing.
+#ifdef TEST_LOGGER
+#define UNIQUE_TAG(X) \
+  (0x12340000 + (((X) + sizeof(int) + sizeof(void*)) << 8) + TEST_LOGGER)
+#else
+#define UNIQUE_TAG(X) \
+  (0x12340000 + (((X) + sizeof(int) + sizeof(void*)) << 8) + 0xBA)
+#endif
+
 TEST(liblog, android_errorWriteWithInfoLog__android_logger_list_read__typical) {
 #ifdef TEST_PREFIX
   int count;
-  android_errorWriteWithInfoLog_helper(123456781, "test-subtag", -1,
+  android_errorWriteWithInfoLog_helper(UNIQUE_TAG(1), "test-subtag", -1,
                                        max_payload_buf, 200, count);
   EXPECT_EQ(SUPPORTS_END_TO_END, count);
 #else
@@ -2132,7 +2164,7 @@ TEST(liblog,
      android_errorWriteWithInfoLog__android_logger_list_read__data_too_large) {
 #ifdef TEST_PREFIX
   int count;
-  android_errorWriteWithInfoLog_helper(123456782, "test-subtag", -1,
+  android_errorWriteWithInfoLog_helper(UNIQUE_TAG(2), "test-subtag", -1,
                                        max_payload_buf, sizeof(max_payload_buf),
                                        count);
   EXPECT_EQ(SUPPORTS_END_TO_END, count);
@@ -2145,8 +2177,8 @@ TEST(liblog,
      android_errorWriteWithInfoLog__android_logger_list_read__null_data) {
 #ifdef TEST_PREFIX
   int count;
-  android_errorWriteWithInfoLog_helper(123456783, "test-subtag", -1, NULL, 200,
-                                       count);
+  android_errorWriteWithInfoLog_helper(UNIQUE_TAG(3), "test-subtag", -1, NULL,
+                                       200, count);
   EXPECT_EQ(0, count);
 #else
   GTEST_LOG_(INFO) << "This test does nothing.\n";
@@ -2158,7 +2190,7 @@ TEST(liblog,
 #ifdef TEST_PREFIX
   int count;
   android_errorWriteWithInfoLog_helper(
-      123456784, "abcdefghijklmnopqrstuvwxyz now i know my abc", -1,
+      UNIQUE_TAG(4), "abcdefghijklmnopqrstuvwxyz now i know my abc", -1,
       max_payload_buf, 200, count);
   EXPECT_EQ(SUPPORTS_END_TO_END, count);
 #else
@@ -2293,7 +2325,7 @@ static void android_errorWriteLog_helper(int TAG, const char* SUBTAG,
 TEST(liblog, android_errorWriteLog__android_logger_list_read__success) {
 #ifdef TEST_PREFIX
   int count;
-  android_errorWriteLog_helper(123456785, "test-subtag", count);
+  android_errorWriteLog_helper(UNIQUE_TAG(5), "test-subtag", count);
   EXPECT_EQ(SUPPORTS_END_TO_END, count);
 #else
   GTEST_LOG_(INFO) << "This test does nothing.\n";
@@ -2303,7 +2335,7 @@ TEST(liblog, android_errorWriteLog__android_logger_list_read__success) {
 TEST(liblog, android_errorWriteLog__android_logger_list_read__null_subtag) {
 #ifdef TEST_PREFIX
   int count;
-  android_errorWriteLog_helper(123456786, NULL, count);
+  android_errorWriteLog_helper(UNIQUE_TAG(6), NULL, count);
   EXPECT_EQ(0, count);
 #else
   GTEST_LOG_(INFO) << "This test does nothing.\n";
