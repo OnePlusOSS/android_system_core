@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2017 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,17 @@
  * limitations under the License.
  */
 
-#ifndef SYSTEM_CORE_INCLUDE_ANDROID_WINDOW_H
-#define SYSTEM_CORE_INCLUDE_ANDROID_WINDOW_H
+#ifndef _INIT_REBOOT_H
+#define _INIT_REBOOT_H
 
-#include <system/window-deprecated.h>
+/* Reboot / shutdown the system.
+ * cmd ANDROID_RB_* as defined in android_reboot.h
+ * reason Reason string like "reboot", "userrequested"
+ * rebootTarget Reboot target string like "bootloader". Otherwise, it should be an
+ *              empty string.
+ * runFsck Whether to run fsck after umount is done.
+ */
+void DoReboot(unsigned int cmd, const std::string& reason, const std::string& rebootTarget,
+              bool runFsck) __attribute__((__noreturn__));
 
-#endif /* SYSTEM_CORE_INCLUDE_ANDROID_WINDOW_H */
+#endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,24 +14,13 @@
  * limitations under the License.
  */
 
-#ifndef _LIBBACKTRACE_BACKTRACE_PTRACE_H
-#define _LIBBACKTRACE_BACKTRACE_PTRACE_H
+#ifndef _CANNED_FS_CONFIG_H
+#define _CANNED_FS_CONFIG_H
 
-#include <stdint.h>
-#include <sys/types.h>
+#include <inttypes.h>
 
-#include <backtrace/Backtrace.h>
+int load_canned_fs_config(const char* fn);
+void canned_fs_config(const char* path, int dir, const char* target_out_path, unsigned* uid,
+                      unsigned* gid, unsigned* mode, uint64_t* capabilities);
 
-class BacktraceMap;
-
-class BacktracePtrace : public Backtrace {
- public:
-  BacktracePtrace(pid_t pid, pid_t tid, BacktraceMap* map) : Backtrace(pid, tid, map) {}
-  virtual ~BacktracePtrace() {}
-
-  size_t Read(uintptr_t addr, uint8_t* buffer, size_t bytes);
-
-  bool ReadWord(uintptr_t ptr, word_t* out_value);
-};
-
-#endif // _LIBBACKTRACE_BACKTRACE_PTRACE_H
+#endif
