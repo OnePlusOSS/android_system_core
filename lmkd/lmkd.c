@@ -68,6 +68,8 @@ static int (*memperf_init_fn)(void) = NULL;
 static int (*memperf_am_update_fn)(void*,unsigned int) = NULL;
 static void init_memperf();
 static void de_init_memperf();
+static bool enable_amupdate = false;
+static bool enable_umm = false;
 
 /* default to old in-kernel interface if no memory pressure events */
 static int use_inkernel_interface = 1;
@@ -364,7 +366,7 @@ static void ctrl_command_handler(void) {
     if (nargs < 0)
         goto wronglen;
 
-    if (memperf_am_update_fn) {
+    if (enable_umm && enable_amupdate) {
         int ret = (*memperf_am_update_fn)(ibuf, sizeof(ibuf));
         if (ret == -1) {
             ALOGE("Received Error from mem_ctl. unloading the module %d", ret);
@@ -831,7 +833,9 @@ static void de_init_memperf() {
 
 static void init_memperf() {
     int mem_ctl_enable = 0;
+    enable_amupdate = property_get_bool("ro.memperf.amupdate", false);
     mem_ctl_enable = property_get_bool("ro.memperf.enable", 0);
+    enable_umm = property_get_bool("ro.memperf.umm", false);
     if (mem_ctl_enable) {
         char prop[PROPERTY_VALUE_MAX];
         memset(prop, '\0', sizeof(prop));
