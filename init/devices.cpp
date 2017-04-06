@@ -63,7 +63,7 @@ static const char *firmware_dirs[] = { "/etc/firmware",
 
 extern struct selabel_handle *sehandle;
 
-extern std::string boot_device;
+std::string boot_device;
 
 static android::base::unique_fd device_fd;
 
