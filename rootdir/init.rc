@@ -299,6 +299,8 @@ on late-init
 
 on post-fs
     start logd
+    start hwservicemanager
+
     # once everything is setup, no need to modify /
     mount rootfs rootfs / ro remount
     # Mount shared so changes propagate into child namespaces
@@ -408,6 +410,9 @@ on post-fs-data
     mkdir /data/misc/profiles/ref 0771 system system
     mkdir /data/misc/profman 0770 system shell
     mkdir /data/misc/gcov 0770 root root
+
+    mkdir /data/vendor 0771 root root
+    mkdir /data/vendor/hardware 0771 root root
 
     # For security reasons, /data/local/tmp should always be empty.
     # Do not place files or directories in /data/local/tmp
@@ -587,13 +592,14 @@ on boot
     # Define default initial receive window size in segments.
     setprop net.tcp.default_init_rwnd 60
 
-    # Start all binderized HAL daemons
-    start hwservicemanager
+    # Start standard binderized HAL daemons
+    class_start hal
+
     class_start core
 
 on nonencrypted
     # A/B update verifier that marks a successful boot.
-    exec - root cache -- /system/bin/update_verifier nonencrypted
+    exec_start update_verifier_nonencrypted
     class_start main
     class_start late_start
 
@@ -616,12 +622,12 @@ on property:vold.decrypt=trigger_post_fs_data
 
 on property:vold.decrypt=trigger_restart_min_framework
     # A/B update verifier that marks a successful boot.
-    exec - root cache -- /system/bin/update_verifier trigger_restart_min_framework
+    exec_start update_verifier
     class_start main
 
 on property:vold.decrypt=trigger_restart_framework
     # A/B update verifier that marks a successful boot.
-    exec - root cache -- /system/bin/update_verifier trigger_restart_framework
+    exec_start update_verifier
     class_start main
     class_start late_start
 

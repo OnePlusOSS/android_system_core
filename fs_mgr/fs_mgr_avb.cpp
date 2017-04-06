@@ -390,10 +390,12 @@ static bool get_hashtree_descriptor(const std::string& partition_name,
             continue;
         }
 
-        // Ensures that hashtree descriptor is either in /vbmeta or in
+        // Ensures that hashtree descriptor is in /vbmeta or /boot or in
         // the same partition for verity setup.
         std::string vbmeta_partition_name(verify_data.vbmeta_images[i].partition_name);
-        if (vbmeta_partition_name != "vbmeta" && vbmeta_partition_name != partition_name) {
+        if (vbmeta_partition_name != "vbmeta" &&
+            vbmeta_partition_name != "boot" &&  // for legacy device to append top-level vbmeta
+            vbmeta_partition_name != partition_name) {
             LWARNING << "Skip vbmeta image at " << verify_data.vbmeta_images[i].partition_name
                      << " for partition: " << partition_name.c_str();
             continue;
@@ -454,12 +456,12 @@ static bool init_is_avb_used() {
     // be returned when there is an error.
 
     std::string hash_alg;
-    if (fs_mgr_get_boot_config("vbmeta.hash_alg", &hash_alg) == 0) {
-        if (hash_alg == "sha256" || hash_alg == "sha512") {
-            return true;
-        }
+    if (!fs_mgr_get_boot_config("vbmeta.hash_alg", &hash_alg)) {
+        return false;
     }
-
+    if (hash_alg == "sha256" || hash_alg == "sha512") {
+        return true;
+    }
     return false;
 }
 
@@ -489,7 +491,13 @@ int fs_mgr_load_vbmeta_images(struct fstab* fstab) {
     // fs_mgr only deals with HASHTREE partitions.
     const char *requested_partitions[] = {nullptr};
     std::string ab_suffix;
-    fs_mgr_get_boot_config("slot_suffix", &ab_suffix);
+    std::string slot;
+    if (fs_mgr_get_boot_config("slot", &slot)) {
+        ab_suffix = "_" + slot;
+    } else {
+        // remove slot_suffix once bootloaders update to new androidboot.slot param
+        fs_mgr_get_boot_config("slot_suffix", &ab_suffix);
+    }
     AvbSlotVerifyResult verify_result =
         avb_slot_verify(fs_mgr_avb_ops, requested_partitions, ab_suffix.c_str(),
                         fs_mgr_vbmeta_prop.allow_verification_error, &fs_mgr_avb_verify_data);

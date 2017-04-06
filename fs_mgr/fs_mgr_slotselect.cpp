@@ -31,14 +31,16 @@ int fs_mgr_update_for_slotselect(struct fstab *fstab)
             char *tmp;
 
             if (!got_suffix) {
-                if (!fs_mgr_get_boot_config("slot_suffix", &suffix)) {
-                  return -1;
+                std::string slot;
+                if (fs_mgr_get_boot_config("slot", &slot)) {
+                    suffix = "_" + slot;
+                } else if (!fs_mgr_get_boot_config("slot_suffix", &suffix)) {
+                    // remove slot_suffix once bootloaders update to new androidboot.slot param
+                    return -1;
                 }
-                got_suffix = 1;
             }
 
-            if (asprintf(&tmp, "%s%s", fstab->recs[n].blk_device,
-                         suffix.c_str()) > 0) {
+            if (asprintf(&tmp, "%s%s", fstab->recs[n].blk_device, suffix.c_str()) > 0) {
                 free(fstab->recs[n].blk_device);
                 fstab->recs[n].blk_device = tmp;
             } else {
