@@ -36,6 +36,7 @@
 #include "devices.h"
 #include "ueventd_parser.h"
 
+std::string boot_device;
 
 int ueventd_main(int argc, char **argv)
 {
@@ -75,7 +76,7 @@ int ueventd_main(int argc, char **argv)
     std::string hardware = android::base::GetProperty("ro.hardware", "");
     ueventd_parse_config_file(android::base::StringPrintf("/ueventd.%s.rc", hardware.c_str()).c_str());
 
-    std::string boot_device = android::base::GetProperty("ro.boot.bootdevice", "");
+    boot_device = android::base::GetProperty("ro.boot.bootdevice", "");
 
     device_init();
 
