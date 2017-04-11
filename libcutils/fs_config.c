@@ -35,21 +35,12 @@
 
 #include <log/log.h>
 #include <private/android_filesystem_config.h>
+#include <private/fs_config.h>
 #include <utils/Compat.h>
 
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
-
-/* The following structure is stored little endian */
-struct fs_path_config_from_file {
-    uint16_t len;
-    uint16_t mode;
-    uint16_t uid;
-    uint16_t gid;
-    uint64_t capabilities;
-    char prefix[];
-} __attribute__((__aligned__(sizeof(uint64_t))));
 
 /* My kingdom for <endian.h> */
 static inline uint16_t get2LE(const uint8_t* src) { return src[0] | (src[1] << 8); }
@@ -236,21 +227,24 @@ static const struct fs_path_config android_files[] = {
     /* clang-format on */
 };
 
+static size_t strip(const char* path, size_t len, const char suffix[]) {
+    if (len < strlen(suffix)) return len;
+    if (strncmp(path + len - strlen(suffix), suffix, strlen(suffix))) return len;
+    return len - strlen(suffix);
+}
+
 static int fs_config_open(int dir, int which, const char* target_out_path) {
     int fd = -1;
 
     if (target_out_path && *target_out_path) {
         /* target_out_path is the path to the directory holding content of
-         * system partition but as we cannot guaranty it ends with '/system'
-         * we need this below skip_len logic */
+         * system partition but as we cannot guarantee it ends with '/system'
+         * or with or without a trailing slash, need to strip them carefully. */
         char* name = NULL;
-        int target_out_path_len = strlen(target_out_path);
-        int skip_len = strlen("/system");
-
-        if (target_out_path[target_out_path_len] == '/') {
-            skip_len++;
-        }
-        if (asprintf(&name, "%s%s", target_out_path, conf[which][dir] + skip_len) != -1) {
+        size_t len = strlen(target_out_path);
+        len = strip(target_out_path, len, "/");
+        len = strip(target_out_path, len, "/system");
+        if (asprintf(&name, "%.*s%s", (int)len, target_out_path, conf[which][dir]) != -1) {
             fd = TEMP_FAILURE_RETRY(open(name, O_RDONLY | O_BINARY));
             free(name);
         }
