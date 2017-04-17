@@ -299,7 +299,9 @@ on late-init
 
 on post-fs
     start logd
+    start servicemanager
     start hwservicemanager
+    start vndservicemanager
 
     # once everything is setup, no need to modify /
     mount rootfs rootfs / ro remount
@@ -407,7 +409,7 @@ on post-fs-data
     mkdir /data/misc/boottrace 0771 system shell
     mkdir /data/misc/update_engine 0700 root root
     mkdir /data/misc/trace 0700 root root
-    mkdir /data/misc/reboot 0700 root root
+    mkdir /data/misc/reboot 0700 system system
     # profile file layout
     mkdir /data/misc/profiles 0771 system system
     mkdir /data/misc/profiles/cur 0771 system system
@@ -644,6 +646,12 @@ on property:sys.powerctl=*
 
 on property:sys.boot_completed=1
     bootchart stop
+
+on property:sys.boot_completed=1 && property:ro.build.type=user
+    write /proc/sys/kernel/modules_disabled 1
+
+on property:sys.boot_completed=1 && property:ro.build.type=userdebug
+    write /proc/sys/kernel/modules_disabled 1
 
 # system server cannot write to /proc/sys files,
 # and chown/chmod does not work for /proc/sys/ entries.
