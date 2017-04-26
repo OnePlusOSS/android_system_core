@@ -64,6 +64,7 @@
 #include "keychords.h"
 #include "log.h"
 #include "property_service.h"
+#include "reboot.h"
 #include "service.h"
 #include "signal_handler.h"
 #include "ueventd.h"
@@ -149,8 +150,13 @@ bool start_waiting_for_property(const char *name, const char *value)
     return true;
 }
 
-void property_changed(const char *name, const char *value)
-{
+void property_changed(const std::string& name, const std::string& value) {
+    // If the property is sys.powerctl, we bypass the event queue and immediately handle it.
+    // This is to ensure that init will always and immediately shutdown/reboot, regardless of
+    // if there are other pending events to process or if init is waiting on an exec service or
+    // waiting on a property.
+    if (name == "sys.powerctl") HandlePowerctlMessage(value);
+
     if (property_triggers_enabled)
         ActionManager::GetInstance().QueuePropertyTrigger(name, value);
     if (waiting_for_prop) {
@@ -844,7 +850,7 @@ static bool selinux_load_split_policy() {
     const char* compile_args[] = {
         "/system/bin/secilc",
         plat_policy_cil_file,
-        "-M", "true", "-G",
+        "-M", "true", "-G", "-N",
         // Target the highest policy language version supported by the kernel
         "-c", std::to_string(max_policy_version).c_str(),
         mapping_file.c_str(),
@@ -1034,10 +1040,11 @@ static bool vboot_2_0_mount_partitions(const std::vector<fstab_rec*>& fstab_recs
         return false;
     }
 
+    setenv("INIT_AVB_VERSION", avb_handle->avb_version().c_str(), 1);
     for (auto rec : fstab_recs) {
         bool need_create_dm_device = false;
         if (fs_mgr_is_avb(rec)) {
-            if (avb_handle->AvbHashtreeDisabled()) {
+            if (avb_handle->hashtree_disabled()) {
                 LOG(INFO) << "avb hashtree disabled for '" << rec->mount_point << "'";
             } else if (avb_handle->SetUpAvb(rec, false /* wait_for_verity_dev */)) {
                 need_create_dm_device = true;
@@ -1384,12 +1391,14 @@ int main(int argc, char** argv) {
     property_set("ro.boottime.init.selinux", getenv("INIT_SELINUX_TOOK"));
 
     // Set libavb version for Framework-only OTA match in Treble build.
-    property_set("ro.boot.init.avb_version", std::to_string(AVB_MAJOR_VERSION).c_str());
+    const char* avb_version = getenv("INIT_AVB_VERSION");
+    if (avb_version) property_set("ro.boot.avb_version", avb_version);
 
     // Clean up our environment.
     unsetenv("INIT_SECOND_STAGE");
     unsetenv("INIT_STARTED_AT");
     unsetenv("INIT_SELINUX_TOOK");
+    unsetenv("INIT_AVB_VERSION");
 
     // Now set up SELinux for second stage.
     selinux_initialize(false);
