@@ -50,19 +50,19 @@
 
 #include <fstream>
 #include <memory>
-#include <set>
 #include <vector>
 
 #include "action.h"
 #include "bootchart.h"
 #include "devices.h"
-#include "fs_mgr.h"
 #include "import_parser.h"
 #include "init.h"
+#include "init_first_stage.h"
 #include "init_parser.h"
 #include "keychords.h"
 #include "log.h"
 #include "property_service.h"
+#include "reboot.h"
 #include "service.h"
 #include "signal_handler.h"
 #include "ueventd.h"
@@ -148,8 +148,13 @@ bool start_waiting_for_property(const char *name, const char *value)
     return true;
 }
 
-void property_changed(const char *name, const char *value)
-{
+void property_changed(const std::string& name, const std::string& value) {
+    // If the property is sys.powerctl, we bypass the event queue and immediately handle it.
+    // This is to ensure that init will always and immediately shutdown/reboot, regardless of
+    // if there are other pending events to process or if init is waiting on an exec service or
+    // waiting on a property.
+    if (name == "sys.powerctl") HandlePowerctlMessage(value);
+
     if (property_triggers_enabled)
         ActionManager::GetInstance().QueuePropertyTrigger(name, value);
     if (waiting_for_prop) {
@@ -478,42 +483,12 @@ static void export_kernel_boot_props() {
     }
 }
 
-static constexpr char android_dt_dir[] = "/proc/device-tree/firmware/android";
-
-static bool is_dt_compatible() {
-    std::string dt_value;
-    std::string file_name = StringPrintf("%s/compatible", android_dt_dir);
-
-    if (android::base::ReadFileToString(file_name, &dt_value)) {
-        // trim the trailing '\0' out, otherwise the comparison
-        // will produce false-negatives.
-        dt_value.resize(dt_value.size() - 1);
-        if (dt_value == "android,firmware") {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static bool is_dt_fstab_compatible() {
-    std::string dt_value;
-    std::string file_name = StringPrintf("%s/%s/compatible", android_dt_dir, "fstab");
-
-    if (android::base::ReadFileToString(file_name, &dt_value)) {
-        dt_value.resize(dt_value.size() - 1);
-        if (dt_value == "android,fstab") {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static void process_kernel_dt() {
-    if (!is_dt_compatible()) return;
+    if (!is_android_dt_value_expected("compatible", "android,firmware")) {
+        return;
+    }
 
-    std::unique_ptr<DIR, int(*)(DIR*)>dir(opendir(android_dt_dir), closedir);
+    std::unique_ptr<DIR, int (*)(DIR*)> dir(opendir(kAndroidDtDir.c_str()), closedir);
     if (!dir) return;
 
     std::string dt_file;
@@ -523,7 +498,7 @@ static void process_kernel_dt() {
             continue;
         }
 
-        std::string file_name = StringPrintf("%s/%s", android_dt_dir, dp->d_name);
+        std::string file_name = kAndroidDtDir + dp->d_name;
 
         android::base::ReadFileToString(file_name, &dt_file);
         std::replace(dt_file.begin(), dt_file.end(), ',', '.');
@@ -736,6 +711,18 @@ static bool selinux_find_precompiled_split_policy(std::string* file) {
     return true;
 }
 
+static bool selinux_get_vendor_mapping_version(std::string* plat_vers) {
+    if (!read_first_line("/vendor/etc/selinux/plat_sepolicy_vers.txt", plat_vers)) {
+        PLOG(ERROR) << "Failed to read /vendor/etc/selinux/plat_sepolicy_vers.txt";
+        return false;
+    }
+    if (plat_vers->empty()) {
+        LOG(ERROR) << "No version present in plat_sepolicy_vers.txt";
+        return false;
+    }
+    return true;
+}
+
 static constexpr const char plat_policy_cil_file[] = "/system/etc/selinux/plat_sepolicy.cil";
 
 static bool selinux_is_split_policy_device() { return access(plat_policy_cil_file, R_OK) != -1; }
@@ -790,14 +777,20 @@ static bool selinux_load_split_policy() {
         return false;
     }
 
+    // Determine which mapping file to include
+    std::string vend_plat_vers;
+    if (!selinux_get_vendor_mapping_version(&vend_plat_vers)) {
+        return false;
+    }
+    std::string mapping_file("/system/etc/selinux/mapping/" + vend_plat_vers + ".cil");
     // clang-format off
     const char* compile_args[] = {
         "/system/bin/secilc",
         plat_policy_cil_file,
-        "-M", "true",
+        "-M", "true", "-G", "-N",
         // Target the highest policy language version supported by the kernel
         "-c", std::to_string(max_policy_version).c_str(),
-        "/system/etc/selinux/mapping_sepolicy.cil",
+        mapping_file.c_str(),
         "/vendor/etc/selinux/nonplat_sepolicy.cil",
         "-o", compiled_sepolicy,
         // We don't care about file_contexts output by the compiler
@@ -900,6 +893,8 @@ static void selinux_restore_context() {
     restorecon("/nonplat_seapp_contexts");
     restorecon("/plat_service_contexts");
     restorecon("/nonplat_service_contexts");
+    restorecon("/plat_hwservice_contexts");
+    restorecon("/nonplat_hwservice_contexts");
     restorecon("/sepolicy");
     restorecon("/vndservice_contexts");
 
@@ -922,193 +917,6 @@ static void set_usb_controller() {
         property_set("sys.usb.controller", dp->d_name);
         break;
     }
-}
-
-static bool early_mount_one(struct fstab_rec* rec) {
-    if (rec && fs_mgr_is_verified(rec)) {
-        // setup verity and create the dm-XX block device
-        // needed to mount this partition
-        int ret = fs_mgr_setup_verity(rec, false);
-        if (ret == FS_MGR_SETUP_VERITY_FAIL) {
-            PLOG(ERROR) << "early_mount: Failed to setup verity for '" << rec->mount_point << "'";
-            return false;
-        }
-
-        // The exact block device name is added as a mount source by
-        // fs_mgr_setup_verity() in ->blk_device as "/dev/block/dm-XX"
-        // We create that device by running coldboot on /sys/block/dm-XX
-        std::string dm_device(basename(rec->blk_device));
-        std::string syspath = StringPrintf("/sys/block/%s", dm_device.c_str());
-        device_init(syspath.c_str(), [&](uevent* uevent) -> coldboot_action_t {
-            if (uevent->device_name && !strcmp(dm_device.c_str(), uevent->device_name)) {
-                LOG(VERBOSE) << "early_mount: creating dm-verity device : " << dm_device;
-                return COLDBOOT_STOP;
-            }
-            return COLDBOOT_CONTINUE;
-        });
-    }
-
-    if (rec && fs_mgr_do_mount_one(rec)) {
-        PLOG(ERROR) << "early_mount: Failed to mount '" << rec->mount_point << "'";
-        return false;
-    }
-
-    return true;
-}
-
-// Creates devices with uevent->partition_name matching one in the in/out
-// partition_names. Note that the partition_names MUST have A/B suffix
-// when A/B is used. Found partitions will then be removed from the
-// partition_names for caller to check which devices are NOT created.
-static void early_device_init(std::set<std::string>* partition_names) {
-    if (partition_names->empty()) {
-        return;
-    }
-    device_init(nullptr, [=](uevent* uevent) -> coldboot_action_t {
-        if (!strncmp(uevent->subsystem, "firmware", 8)) {
-            return COLDBOOT_CONTINUE;
-        }
-
-        // we need platform devices to create symlinks
-        if (!strncmp(uevent->subsystem, "platform", 8)) {
-            return COLDBOOT_CREATE;
-        }
-
-        // Ignore everything that is not a block device
-        if (strncmp(uevent->subsystem, "block", 5)) {
-            return COLDBOOT_CONTINUE;
-        }
-
-        if (uevent->partition_name) {
-            // match partition names to create device nodes for partitions
-            // both partition_names and uevent->partition_name have A/B suffix when A/B is used
-            auto iter = partition_names->find(uevent->partition_name);
-            if (iter != partition_names->end()) {
-                LOG(VERBOSE) << "early_mount: found partition: " << *iter;
-                partition_names->erase(iter);
-                if (partition_names->empty()) {
-                    return COLDBOOT_STOP;  // found all partitions, stop coldboot
-                } else {
-                    return COLDBOOT_CREATE;  // create this device and continue to find others
-                }
-            }
-        }
-        // Not found a partition or find an unneeded partition, continue to find others
-        return COLDBOOT_CONTINUE;
-    });
-}
-
-static bool get_early_partitions(const std::vector<fstab_rec*>& early_fstab_recs,
-                                 std::set<std::string>* out_partitions, bool* out_need_verity) {
-    std::string meta_partition;
-    out_partitions->clear();
-    *out_need_verity = false;
-
-    for (auto fstab_rec : early_fstab_recs) {
-        // don't allow verifyatboot for early mounted partitions
-        if (fs_mgr_is_verifyatboot(fstab_rec)) {
-            LOG(ERROR) << "early_mount: partitions can't be verified at boot";
-            return false;
-        }
-        // check for verified partitions
-        if (fs_mgr_is_verified(fstab_rec)) {
-            *out_need_verity = true;
-        }
-        // check if verity metadata is on a separate partition and get partition
-        // name from the end of the ->verity_loc path. verity state is not partition
-        // specific, so there must be only 1 additional partition that carries
-        // verity state.
-        if (fstab_rec->verity_loc) {
-            if (!meta_partition.empty()) {
-                LOG(ERROR) << "early_mount: more than one meta partition found: " << meta_partition
-                           << ", " << basename(fstab_rec->verity_loc);
-                return false;
-            } else {
-                meta_partition = basename(fstab_rec->verity_loc);
-            }
-        }
-    }
-
-    // includes those early mount partitions and meta_partition (if any)
-    // note that fstab_rec->blk_device has A/B suffix updated by fs_mgr when A/B is used
-    for (auto fstab_rec : early_fstab_recs) {
-        out_partitions->emplace(basename(fstab_rec->blk_device));
-    }
-
-    if (!meta_partition.empty()) {
-        out_partitions->emplace(std::move(meta_partition));
-    }
-
-    return true;
-}
-
-/* Early mount vendor and ODM partitions. The fstab is read from device-tree. */
-static bool early_mount() {
-    // skip early mount if we're in recovery mode
-    if (access("/sbin/recovery", F_OK) == 0) {
-        LOG(INFO) << "Early mount skipped (recovery mode)";
-        return true;
-    }
-
-    // first check if device tree fstab entries are compatible
-    if (!is_dt_fstab_compatible()) {
-        LOG(INFO) << "Early mount skipped (missing/incompatible fstab in device tree)";
-        return true;
-    }
-
-    std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)> tab(
-        fs_mgr_read_fstab_dt(), fs_mgr_free_fstab);
-    if (!tab) {
-        LOG(ERROR) << "Early mount failed to read fstab from device tree";
-        return false;
-    }
-
-    // find out fstab records for odm, system and vendor
-    std::vector<fstab_rec*> early_fstab_recs;
-    for (auto mount_point : {"/odm", "/system", "/vendor"}) {
-        fstab_rec* fstab_rec = fs_mgr_get_entry_for_mount_point(tab.get(), mount_point);
-        if (fstab_rec != nullptr) {
-            early_fstab_recs.push_back(fstab_rec);
-        }
-    }
-
-    // nothing to early mount
-    if (early_fstab_recs.empty()) return true;
-
-    bool need_verity;
-    std::set<std::string> partition_names;
-    // partition_names MUST have A/B suffix when A/B is used
-    if (!get_early_partitions(early_fstab_recs, &partition_names, &need_verity)) {
-        return false;
-    }
-
-    bool success = false;
-    // create the devices we need..
-    early_device_init(&partition_names);
-
-    // early_device_init will remove found partitions from partition_names
-    // So if the partition_names is not empty here, means some partitions
-    // are not found
-    if (!partition_names.empty()) {
-        LOG(ERROR) << "early_mount: partition(s) not found: "
-                   << android::base::Join(partition_names, ", ");
-        goto done;
-    }
-
-    if (need_verity) {
-        // create /dev/device mapper
-        device_init("/sys/devices/virtual/misc/device-mapper",
-                    [&](uevent* uevent) -> coldboot_action_t { return COLDBOOT_STOP; });
-    }
-
-    for (auto fstab_rec : early_fstab_recs) {
-        if (!early_mount_one(fstab_rec)) goto done;
-    }
-    success = true;
-
-done:
-    device_close();
-    return success;
 }
 
 static void install_reboot_signal_handlers() {
@@ -1183,10 +991,12 @@ int main(int argc, char** argv) {
 
         LOG(INFO) << "init first stage started!";
 
-        if (!early_mount()) {
+        if (!DoFirstStageMount()) {
             LOG(ERROR) << "Failed to mount required partitions early ...";
             panic();
         }
+
+        SetInitAvbVersionInRecovery();
 
         // Set up SELinux, loading the SELinux policy.
         selinux_initialize(true);
@@ -1237,12 +1047,14 @@ int main(int argc, char** argv) {
     property_set("ro.boottime.init.selinux", getenv("INIT_SELINUX_TOOK"));
 
     // Set libavb version for Framework-only OTA match in Treble build.
-    property_set("ro.boot.init.avb_version", std::to_string(AVB_MAJOR_VERSION).c_str());
+    const char* avb_version = getenv("INIT_AVB_VERSION");
+    if (avb_version) property_set("ro.boot.avb_version", avb_version);
 
     // Clean up our environment.
     unsetenv("INIT_SECOND_STAGE");
     unsetenv("INIT_STARTED_AT");
     unsetenv("INIT_SELINUX_TOOK");
+    unsetenv("INIT_AVB_VERSION");
 
     // Now set up SELinux for second stage.
     selinux_initialize(false);
@@ -1311,6 +1123,9 @@ int main(int argc, char** argv) {
     std::string bootmode = GetProperty("ro.bootmode", "");
     if (bootmode == "charger") {
         am.QueueEventTrigger("charger");
+    } else if ((strncmp(bootmode.c_str(), "ffbm-00", 7) == 0)
+        || (strncmp(bootmode.c_str(), "ffbm-01", 7) == 0)) {
+        am.QueueEventTrigger("ffbm");
     } else {
         am.QueueEventTrigger("late-init");
     }

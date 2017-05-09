@@ -71,7 +71,7 @@ LOCAL_SRC_FILES:= \
     service.cpp \
     util.cpp \
 
-LOCAL_STATIC_LIBRARIES := libbase libselinux liblog libprocessgroup libnl
+LOCAL_STATIC_LIBRARIES := libbase libselinux liblog libprocessgroup
 LOCAL_WHOLE_STATIC_LIBRARIES := libcap
 LOCAL_MODULE := libinit
 LOCAL_SANITIZE := integer
@@ -85,6 +85,7 @@ LOCAL_SRC_FILES:= \
     builtins.cpp \
     devices.cpp \
     init.cpp \
+    init_first_stage.cpp \
     keychords.cpp \
     property_service.cpp \
     reboot.cpp \
@@ -109,8 +110,8 @@ LOCAL_STATIC_LIBRARIES := \
     libfec_rs \
     libsquashfs_utils \
     liblogwrap \
-    libcutils \
     libext4_utils \
+    libcutils \
     libbase \
     libc \
     libselinux \
@@ -122,7 +123,6 @@ LOCAL_STATIC_LIBRARIES := \
     libsparse \
     libz \
     libprocessgroup \
-    libnl \
     libavb
 
 # Create symlinks.
