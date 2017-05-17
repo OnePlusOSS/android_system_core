@@ -542,8 +542,7 @@ static void make_link_init(const char* oldpath, const char* newpath) {
   }
 }
 
-static char **get_block_device_symlinks(struct uevent *uevent)
-{
+char** get_block_device_symlinks(struct uevent* uevent) {
     const char *device;
     struct platform_node *pdev;
     const char *slash;
