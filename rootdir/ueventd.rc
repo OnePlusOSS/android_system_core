@@ -20,6 +20,9 @@ subsystem adf
 /dev/ashmem               0666   root       root
 /dev/binder               0666   root       root
 
+# liochen@BSP, Add fastboot oem lock/unlock command
+/dev/block/sda12          0600   system     system
+
 # Anyone can read the logs, but if they're not in the "logs"
 # group, then they'll only see log entries for their UID.
 /dev/log/*                0666   root       log
