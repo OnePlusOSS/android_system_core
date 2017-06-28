@@ -22,3 +22,5 @@ libsync.so
 libvulkan.so
 libwebviewchromium_plat_support.so
 libz.so
+libqti_performance.so
+libqti-perfd-client_system.so
