@@ -64,7 +64,7 @@ using namespace std::chrono_literals;
 
 #define FUNCTIONFS_ENDPOINT_ALLOC       _IOR('g', 231, __u32)
 
-static constexpr size_t ENDPOINT_ALLOC_RETRIES = 2;
+static constexpr size_t ENDPOINT_ALLOC_RETRIES = 10;
 
 static int dummy_fd = -1;
 
@@ -451,9 +451,7 @@ static void usb_ffs_init() {
     h->close = usb_ffs_close;
 
     D("[ usb_init - starting thread ]");
-    if (!adb_thread_create(usb_ffs_open_thread, h)) {
-        fatal_errno("[ cannot create usb thread ]\n");
-    }
+    std::thread(usb_ffs_open_thread, h).detach();
 }
 
 void usb_init() {

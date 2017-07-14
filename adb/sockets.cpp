@@ -686,7 +686,7 @@ static int smart_socket_enqueue(asocket* s, apacket* p) {
     }
 
     len = unhex(p->data, 4);
-    if ((len < 1) || (len > MAX_PAYLOAD_V1)) {
+    if ((len < 1) || (len > MAX_PAYLOAD)) {
         D("SS(%d): bad size (%d)", s->id, len);
         goto fail;
     }
@@ -794,7 +794,7 @@ static int smart_socket_enqueue(asocket* s, apacket* p) {
     if (!s->transport) {
         SendFail(s->peer->fd, "device offline (no transport)");
         goto fail;
-    } else if (s->transport->connection_state == kCsOffline) {
+    } else if (s->transport->GetConnectionState() == kCsOffline) {
         /* if there's no remote we fail the connection
          ** right here and terminate it
          */

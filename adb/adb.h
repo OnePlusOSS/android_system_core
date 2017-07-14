@@ -139,7 +139,7 @@ int adb_server_main(int is_daemon, const std::string& socket_spec, int ack_reply
 int get_available_local_transport_index();
 #endif
 int  init_socket_transport(atransport *t, int s, int port, int local);
-void init_usb_transport(atransport *t, usb_handle *usb, ConnectionState state);
+void init_usb_transport(atransport* t, usb_handle* usb);
 
 std::string getEmulatorSerialString(int console_port);
 #if ADB_HOST
@@ -222,7 +222,24 @@ void handle_online(atransport *t);
 void handle_offline(atransport *t);
 
 void send_connect(atransport *t);
+#if ADB_HOST
+void SendConnectOnHost(atransport* t);
+#endif
 
 void parse_banner(const std::string&, atransport* t);
+
+// On startup, the adb server needs to wait until all of the connected devices are ready.
+// To do this, we need to know when the scan has identified all of the potential new transports, and
+// when each transport becomes ready.
+// TODO: Do this for mDNS as well, instead of just USB?
+
+// We've found all of the transports we potentially care about.
+void adb_notify_device_scan_complete();
+
+// One or more transports have changed status, check to see if we're ready.
+void update_transport_status();
+
+// Wait until device scan has completed and every transport is ready, or a timeout elapses.
+void adb_wait_for_device_initialization();
 
 #endif

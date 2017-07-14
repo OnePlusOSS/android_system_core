@@ -15,19 +15,20 @@
  */
 
 #include <elf.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 
 #include "Elf.h"
 
+#include "ElfTestUtils.h"
 #include "MemoryFake.h"
 
 #if !defined(PT_ARM_EXIDX)
 #define PT_ARM_EXIDX 0x70000001
-#endif
-
-#if !defined(EM_AARCH64)
-#define EM_AARCH64 183
 #endif
 
 class ElfTest : public ::testing::Test {
@@ -36,35 +37,16 @@ class ElfTest : public ::testing::Test {
     memory_ = new MemoryFake;
   }
 
-  template <typename Ehdr>
-  void InitEhdr(Ehdr* ehdr) {
-    memset(ehdr, 0, sizeof(Ehdr));
-    memcpy(&ehdr->e_ident[0], ELFMAG, SELFMAG);
-    ehdr->e_ident[EI_DATA] = ELFDATA2LSB;
-    ehdr->e_ident[EI_VERSION] = EV_CURRENT;
-    ehdr->e_ident[EI_OSABI] = ELFOSABI_SYSV;
-  }
-
-  void InitElf32(uint32_t type) {
+  void InitElf32(uint32_t machine_type) {
     Elf32_Ehdr ehdr;
+    TestInitEhdr<Elf32_Ehdr>(&ehdr, ELFCLASS32, machine_type);
 
-    InitEhdr<Elf32_Ehdr>(&ehdr);
-    ehdr.e_ident[EI_CLASS] = ELFCLASS32;
-
-    ehdr.e_type = ET_DYN;
-    ehdr.e_machine = type;
-    ehdr.e_version = EV_CURRENT;
-    ehdr.e_entry = 0;
     ehdr.e_phoff = 0x100;
-    ehdr.e_shoff = 0;
-    ehdr.e_flags = 0;
     ehdr.e_ehsize = sizeof(ehdr);
     ehdr.e_phentsize = sizeof(Elf32_Phdr);
     ehdr.e_phnum = 1;
     ehdr.e_shentsize = sizeof(Elf32_Shdr);
-    ehdr.e_shnum = 0;
-    ehdr.e_shstrndx = 0;
-    if (type == EM_ARM) {
+    if (machine_type == EM_ARM) {
       ehdr.e_flags = 0x5000200;
       ehdr.e_phnum = 2;
     }
@@ -73,16 +55,13 @@ class ElfTest : public ::testing::Test {
     Elf32_Phdr phdr;
     memset(&phdr, 0, sizeof(phdr));
     phdr.p_type = PT_LOAD;
-    phdr.p_offset = 0;
-    phdr.p_vaddr = 0;
-    phdr.p_paddr = 0;
     phdr.p_filesz = 0x10000;
     phdr.p_memsz = 0x10000;
     phdr.p_flags = PF_R | PF_X;
     phdr.p_align = 0x1000;
     memory_->SetMemory(0x100, &phdr, sizeof(phdr));
 
-    if (type == EM_ARM) {
+    if (machine_type == EM_ARM) {
       memset(&phdr, 0, sizeof(phdr));
       phdr.p_type = PT_ARM_EXIDX;
       phdr.p_offset = 0x30000;
@@ -96,33 +75,21 @@ class ElfTest : public ::testing::Test {
     }
   }
 
-  void InitElf64(uint32_t type) {
+  void InitElf64(uint32_t machine_type) {
     Elf64_Ehdr ehdr;
+    TestInitEhdr<Elf64_Ehdr>(&ehdr, ELFCLASS64, machine_type);
 
-    InitEhdr<Elf64_Ehdr>(&ehdr);
-    ehdr.e_ident[EI_CLASS] = ELFCLASS64;
-
-    ehdr.e_type = ET_DYN;
-    ehdr.e_machine = type;
-    ehdr.e_version = EV_CURRENT;
-    ehdr.e_entry = 0;
     ehdr.e_phoff = 0x100;
-    ehdr.e_shoff = 0;
     ehdr.e_flags = 0x5000200;
     ehdr.e_ehsize = sizeof(ehdr);
     ehdr.e_phentsize = sizeof(Elf64_Phdr);
     ehdr.e_phnum = 1;
     ehdr.e_shentsize = sizeof(Elf64_Shdr);
-    ehdr.e_shnum = 0;
-    ehdr.e_shstrndx = 0;
     memory_->SetMemory(0, &ehdr, sizeof(ehdr));
 
     Elf64_Phdr phdr;
     memset(&phdr, 0, sizeof(phdr));
     phdr.p_type = PT_LOAD;
-    phdr.p_offset = 0;
-    phdr.p_vaddr = 0;
-    phdr.p_paddr = 0;
     phdr.p_filesz = 0x10000;
     phdr.p_memsz = 0x10000;
     phdr.p_flags = PF_R | PF_X;
@@ -207,4 +174,66 @@ TEST_F(ElfTest, elf_x86_64) {
   ASSERT_EQ(static_cast<uint32_t>(EM_X86_64), elf.machine_type());
   ASSERT_EQ(ELFCLASS64, elf.class_type());
   ASSERT_TRUE(elf.interface() != nullptr);
+}
+
+TEST_F(ElfTest, gnu_debugdata_init_fail32) {
+  TestInitGnuDebugdata<Elf32_Ehdr, Elf32_Shdr>(ELFCLASS32, EM_ARM, false,
+                                               [&](uint64_t offset, const void* ptr, size_t size) {
+                                                 memory_->SetMemory(offset, ptr, size);
+                                               });
+
+  Elf elf(memory_);
+  ASSERT_TRUE(elf.Init());
+  ASSERT_TRUE(elf.interface() != nullptr);
+  ASSERT_TRUE(elf.gnu_debugdata_interface() == nullptr);
+  EXPECT_EQ(0x1acU, elf.interface()->gnu_debugdata_offset());
+  EXPECT_EQ(0x100U, elf.interface()->gnu_debugdata_size());
+}
+
+TEST_F(ElfTest, gnu_debugdata_init_fail64) {
+  TestInitGnuDebugdata<Elf64_Ehdr, Elf64_Shdr>(ELFCLASS64, EM_AARCH64, false,
+                                               [&](uint64_t offset, const void* ptr, size_t size) {
+                                                 memory_->SetMemory(offset, ptr, size);
+                                               });
+
+  Elf elf(memory_);
+  ASSERT_TRUE(elf.Init());
+  ASSERT_TRUE(elf.interface() != nullptr);
+  ASSERT_TRUE(elf.gnu_debugdata_interface() == nullptr);
+  EXPECT_EQ(0x200U, elf.interface()->gnu_debugdata_offset());
+  EXPECT_EQ(0x100U, elf.interface()->gnu_debugdata_size());
+}
+
+TEST_F(ElfTest, gnu_debugdata_init32) {
+  TestInitGnuDebugdata<Elf32_Ehdr, Elf32_Shdr>(ELFCLASS32, EM_ARM, true,
+                                               [&](uint64_t offset, const void* ptr, size_t size) {
+                                                 memory_->SetMemory(offset, ptr, size);
+                                               });
+
+  Elf elf(memory_);
+  ASSERT_TRUE(elf.Init());
+  ASSERT_TRUE(elf.interface() != nullptr);
+  ASSERT_TRUE(elf.gnu_debugdata_interface() == nullptr);
+  EXPECT_EQ(0x1acU, elf.interface()->gnu_debugdata_offset());
+  EXPECT_EQ(0x8cU, elf.interface()->gnu_debugdata_size());
+
+  elf.InitGnuDebugdata();
+  ASSERT_TRUE(elf.gnu_debugdata_interface() != nullptr);
+}
+
+TEST_F(ElfTest, gnu_debugdata_init64) {
+  TestInitGnuDebugdata<Elf64_Ehdr, Elf64_Shdr>(ELFCLASS64, EM_AARCH64, true,
+                                               [&](uint64_t offset, const void* ptr, size_t size) {
+                                                 memory_->SetMemory(offset, ptr, size);
+                                               });
+
+  Elf elf(memory_);
+  ASSERT_TRUE(elf.Init());
+  ASSERT_TRUE(elf.interface() != nullptr);
+  ASSERT_TRUE(elf.gnu_debugdata_interface() == nullptr);
+  EXPECT_EQ(0x200U, elf.interface()->gnu_debugdata_offset());
+  EXPECT_EQ(0x90U, elf.interface()->gnu_debugdata_size());
+
+  elf.InitGnuDebugdata();
+  ASSERT_TRUE(elf.gnu_debugdata_interface() != nullptr);
 }

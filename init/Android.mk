@@ -37,53 +37,11 @@ init_cflags += \
 
 # --
 
-# If building on Linux, then build unit test for the host.
-ifeq ($(HOST_OS),linux)
-include $(CLEAR_VARS)
-LOCAL_CPPFLAGS := $(init_cflags)
-LOCAL_SRC_FILES:= \
-    parser/tokenizer.cpp \
-
-LOCAL_MODULE := libinit_parser
-LOCAL_CLANG := true
-include $(BUILD_HOST_STATIC_LIBRARY)
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := init_parser_tests
-LOCAL_SRC_FILES := \
-    parser/tokenizer_test.cpp \
-
-LOCAL_STATIC_LIBRARIES := libinit_parser
-LOCAL_CLANG := true
-include $(BUILD_HOST_NATIVE_TEST)
-endif
-
-include $(CLEAR_VARS)
-LOCAL_CPPFLAGS := $(init_cflags)
-LOCAL_SRC_FILES:= \
-    action.cpp \
-    capabilities.cpp \
-    descriptors.cpp \
-    import_parser.cpp \
-    init_parser.cpp \
-    log.cpp \
-    parser.cpp \
-    service.cpp \
-    util.cpp \
-
-LOCAL_STATIC_LIBRARIES := libbase libselinux liblog libprocessgroup
-LOCAL_WHOLE_STATIC_LIBRARIES := libcap
-LOCAL_MODULE := libinit
-LOCAL_SANITIZE := integer
-LOCAL_CLANG := true
-include $(BUILD_STATIC_LIBRARY)
-
 include $(CLEAR_VARS)
 LOCAL_CPPFLAGS := $(init_cflags)
 LOCAL_SRC_FILES:= \
     bootchart.cpp \
     builtins.cpp \
-    devices.cpp \
     init.cpp \
     init_first_stage.cpp \
     keychords.cpp \
@@ -91,7 +49,6 @@ LOCAL_SRC_FILES:= \
     reboot.cpp \
     signal_handler.cpp \
     ueventd.cpp \
-    ueventd_parser.cpp \
     watchdogd.cpp \
 
 LOCAL_MODULE:= init
@@ -123,7 +80,12 @@ LOCAL_STATIC_LIBRARIES := \
     libsparse \
     libz \
     libprocessgroup \
-    libavb
+    libavb \
+    libkeyutils \
+
+LOCAL_REQUIRED_MODULES := \
+    e2fsdroid \
+    mke2fs \
 
 # Create symlinks.
 LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \
@@ -133,29 +95,3 @@ LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \
 LOCAL_SANITIZE := integer
 LOCAL_CLANG := true
 include $(BUILD_EXECUTABLE)
-
-
-# Unit tests.
-# =========================================================
-include $(CLEAR_VARS)
-LOCAL_MODULE := init_tests
-LOCAL_SRC_FILES := \
-    init_parser_test.cpp \
-    property_service_test.cpp \
-    service_test.cpp \
-    util_test.cpp \
-
-LOCAL_SHARED_LIBRARIES += \
-    libcutils \
-    libbase \
-
-LOCAL_STATIC_LIBRARIES := libinit
-LOCAL_SANITIZE := integer
-LOCAL_CLANG := true
-LOCAL_CPPFLAGS := -Wall -Wextra -Werror
-include $(BUILD_NATIVE_TEST)
-
-
-# Include targets in subdirs.
-# =========================================================
-include $(call all-makefiles-under,$(LOCAL_PATH))

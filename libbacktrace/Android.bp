@@ -110,9 +110,10 @@ cc_library {
                 "libunwind",
             ],
 
-            static_libs: ["libcutils"],
+            static_libs: ["libasync_safe", "libcutils"],
         },
     },
+    whole_static_libs: ["libdemangle"],
 }
 
 cc_library_shared {
@@ -160,6 +161,7 @@ cc_library_static {
     shared_libs = [
         "libbase",
         "libunwind",
+        "libziparchive",
     ],
 }
 

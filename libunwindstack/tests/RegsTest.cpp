@@ -48,15 +48,16 @@ class ElfInterfaceFake : public ElfInterface {
 };
 
 template <typename TypeParam>
-class RegsTestTmpl : public RegsTmpl<TypeParam> {
+class RegsTestImpl : public RegsImpl<TypeParam> {
  public:
-  RegsTestTmpl(uint16_t total_regs, uint16_t regs_sp)
-      : RegsTmpl<TypeParam>(total_regs, regs_sp, Regs::Location(Regs::LOCATION_UNKNOWN, 0)) {}
-  RegsTestTmpl(uint16_t total_regs, uint16_t regs_sp, Regs::Location return_loc)
-      : RegsTmpl<TypeParam>(total_regs, regs_sp, return_loc) {}
-  virtual ~RegsTestTmpl() = default;
+  RegsTestImpl(uint16_t total_regs, uint16_t regs_sp)
+      : RegsImpl<TypeParam>(total_regs, regs_sp, Regs::Location(Regs::LOCATION_UNKNOWN, 0)) {}
+  RegsTestImpl(uint16_t total_regs, uint16_t regs_sp, Regs::Location return_loc)
+      : RegsImpl<TypeParam>(total_regs, regs_sp, return_loc) {}
+  virtual ~RegsTestImpl() = default;
 
-  uint64_t GetAdjustedPc(uint64_t, Elf*) { return 0; }
+  uint64_t GetAdjustedPc(uint64_t, Elf*) override { return 0; }
+  void SetFromRaw() override {}
 };
 
 class RegsTest : public ::testing::Test {
@@ -80,7 +81,7 @@ class RegsTest : public ::testing::Test {
 };
 
 TEST_F(RegsTest, regs32) {
-  RegsTestTmpl<uint32_t> regs32(50, 10);
+  RegsTestImpl<uint32_t> regs32(50, 10);
   ASSERT_EQ(50U, regs32.total_regs());
   ASSERT_EQ(10U, regs32.sp_reg());
 
@@ -103,7 +104,7 @@ TEST_F(RegsTest, regs32) {
 }
 
 TEST_F(RegsTest, regs64) {
-  RegsTestTmpl<uint64_t> regs64(30, 12);
+  RegsTestImpl<uint64_t> regs64(30, 12);
   ASSERT_EQ(30U, regs64.total_regs());
   ASSERT_EQ(12U, regs64.sp_reg());
 
@@ -127,7 +128,7 @@ TEST_F(RegsTest, regs64) {
 
 template <typename AddressType>
 void RegsTest::regs_rel_pc() {
-  RegsTestTmpl<AddressType> regs(30, 12);
+  RegsTestImpl<AddressType> regs(30, 12);
 
   elf_interface_->set_load_bias(0);
   MapInfo map_info{.start = 0x1000, .end = 0x2000};
@@ -147,7 +148,7 @@ TEST_F(RegsTest, regs64_rel_pc) {
 
 template <typename AddressType>
 void RegsTest::regs_return_address_register() {
-  RegsTestTmpl<AddressType> regs(20, 10, Regs::Location(Regs::LOCATION_REGISTER, 5));
+  RegsTestImpl<AddressType> regs(20, 10, Regs::Location(Regs::LOCATION_REGISTER, 5));
 
   regs[5] = 0x12345;
   uint64_t value;
@@ -164,7 +165,7 @@ TEST_F(RegsTest, regs64_return_address_register) {
 }
 
 TEST_F(RegsTest, regs32_return_address_sp_offset) {
-  RegsTestTmpl<uint32_t> regs(20, 10, Regs::Location(Regs::LOCATION_SP_OFFSET, -2));
+  RegsTestImpl<uint32_t> regs(20, 10, Regs::Location(Regs::LOCATION_SP_OFFSET, -2));
 
   regs.set_sp(0x2002);
   memory_->SetData32(0x2000, 0x12345678);
@@ -174,7 +175,7 @@ TEST_F(RegsTest, regs32_return_address_sp_offset) {
 }
 
 TEST_F(RegsTest, regs64_return_address_sp_offset) {
-  RegsTestTmpl<uint64_t> regs(20, 10, Regs::Location(Regs::LOCATION_SP_OFFSET, -8));
+  RegsTestImpl<uint64_t> regs(20, 10, Regs::Location(Regs::LOCATION_SP_OFFSET, -8));
 
   regs.set_sp(0x2008);
   memory_->SetData64(0x2000, 0x12345678aabbccddULL);
@@ -263,4 +264,44 @@ TEST_F(RegsTest, elf_invalid) {
   regs_x86_64.set_pc(0x1800);
   ASSERT_EQ(0x800U, regs_x86_64.GetRelPc(&invalid_elf, &map_info));
   ASSERT_EQ(0x800U, regs_x86_64.GetAdjustedPc(0x800U, &invalid_elf));
+}
+
+TEST_F(RegsTest, arm_set_from_raw) {
+  RegsArm arm;
+  uint32_t* regs = reinterpret_cast<uint32_t*>(arm.RawData());
+  regs[13] = 0x100;
+  regs[15] = 0x200;
+  arm.SetFromRaw();
+  EXPECT_EQ(0x100U, arm.sp());
+  EXPECT_EQ(0x200U, arm.pc());
+}
+
+TEST_F(RegsTest, arm64_set_from_raw) {
+  RegsArm64 arm64;
+  uint64_t* regs = reinterpret_cast<uint64_t*>(arm64.RawData());
+  regs[31] = 0xb100000000ULL;
+  regs[32] = 0xc200000000ULL;
+  arm64.SetFromRaw();
+  EXPECT_EQ(0xb100000000U, arm64.sp());
+  EXPECT_EQ(0xc200000000U, arm64.pc());
+}
+
+TEST_F(RegsTest, x86_set_from_raw) {
+  RegsX86 x86;
+  uint32_t* regs = reinterpret_cast<uint32_t*>(x86.RawData());
+  regs[4] = 0x23450000;
+  regs[8] = 0xabcd0000;
+  x86.SetFromRaw();
+  EXPECT_EQ(0x23450000U, x86.sp());
+  EXPECT_EQ(0xabcd0000U, x86.pc());
+}
+
+TEST_F(RegsTest, x86_64_set_from_raw) {
+  RegsX86_64 x86_64;
+  uint64_t* regs = reinterpret_cast<uint64_t*>(x86_64.RawData());
+  regs[7] = 0x1200000000ULL;
+  regs[16] = 0x4900000000ULL;
+  x86_64.SetFromRaw();
+  EXPECT_EQ(0x1200000000U, x86_64.sp());
+  EXPECT_EQ(0x4900000000U, x86_64.pc());
 }

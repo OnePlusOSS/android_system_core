@@ -13,11 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include "reboot.h"
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <mntent.h>
-#include <selinux/selinux.h>
+#include <sys/capability.h>
 #include <sys/cdefs.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -29,11 +32,12 @@
 
 #include <memory>
 #include <set>
-#include <string>
 #include <thread>
 #include <vector>
 
+#include <android-base/chrono_utils.h>
 #include <android-base/file.h>
+#include <android-base/logging.h>
 #include <android-base/macros.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
@@ -45,13 +49,16 @@
 #include <logwrap/logwrap.h>
 #include <private/android_filesystem_config.h>
 
-#include "log.h"
+#include "capabilities.h"
+#include "init.h"
 #include "property_service.h"
-#include "reboot.h"
 #include "service.h"
-#include "util.h"
 
 using android::base::StringPrintf;
+using android::base::Timer;
+
+namespace android {
+namespace init {
 
 // represents umount status during reboot / shutdown.
 enum UmountStat {
@@ -156,12 +163,42 @@ static void ShutdownVold() {
 }
 
 static void LogShutdownTime(UmountStat stat, Timer* t) {
-    LOG(WARNING) << "powerctl_shutdown_time_ms:" << std::to_string(t->duration_ms()) << ":" << stat;
+    LOG(WARNING) << "powerctl_shutdown_time_ms:" << std::to_string(t->duration().count()) << ":"
+                 << stat;
+}
+
+// Determines whether the system is capable of rebooting. This is conservative,
+// so if any of the attempts to determine this fail, it will still return true.
+static bool IsRebootCapable() {
+    if (!CAP_IS_SUPPORTED(CAP_SYS_BOOT)) {
+        PLOG(WARNING) << "CAP_SYS_BOOT is not supported";
+        return true;
+    }
+
+    ScopedCaps caps(cap_get_proc());
+    if (!caps) {
+        PLOG(WARNING) << "cap_get_proc() failed";
+        return true;
+    }
+
+    cap_flag_value_t value = CAP_SET;
+    if (cap_get_flag(caps.get(), CAP_SYS_BOOT, CAP_EFFECTIVE, &value) != 0) {
+        PLOG(WARNING) << "cap_get_flag(CAP_SYS_BOOT, EFFECTIVE) failed";
+        return true;
+    }
+    return value == CAP_SET;
 }
 
 static void __attribute__((noreturn))
 RebootSystem(unsigned int cmd, const std::string& rebootTarget) {
     LOG(INFO) << "Reboot ending, jumping to kernel";
+
+    if (!IsRebootCapable()) {
+        // On systems where init does not have the capability of rebooting the
+        // device, just exit cleanly.
+        exit(0);
+    }
+
     switch (cmd) {
         case ANDROID_RB_POWEROFF:
             reboot(RB_POWER_OFF);
@@ -220,7 +257,7 @@ static void DumpUmountDebuggingInfo(bool dump_all) {
     }
 }
 
-static UmountStat UmountPartitions(int timeoutMs) {
+static UmountStat UmountPartitions(std::chrono::milliseconds timeout) {
     Timer t;
     UmountStat stat = UMOUNT_STAT_TIMEOUT;
     int retry = 0;
@@ -238,7 +275,7 @@ static UmountStat UmountPartitions(int timeoutMs) {
             stat = UMOUNT_STAT_SUCCESS;
             break;
         }
-        if ((timeoutMs < t.duration_ms()) && retry > 0) {  // try umount at least once
+        if ((timeout < t.duration()) && retry > 0) {  // try umount at least once
             stat = UMOUNT_STAT_TIMEOUT;
             break;
         }
@@ -267,7 +304,7 @@ static void KillAllProcesses() { android::base::WriteStringToFile("i", "/proc/sy
  *
  * return true when umount was successful. false when timed out.
  */
-static UmountStat TryUmountAndFsck(bool runFsck, int timeoutMs) {
+static UmountStat TryUmountAndFsck(bool runFsck, std::chrono::milliseconds timeout) {
     Timer t;
     std::vector<MountEntry> block_devices;
     std::vector<MountEntry> emulated_devices;
@@ -278,13 +315,13 @@ static UmountStat TryUmountAndFsck(bool runFsck, int timeoutMs) {
         return UMOUNT_STAT_ERROR;
     }
 
-    UmountStat stat = UmountPartitions(timeoutMs - t.duration_ms());
+    UmountStat stat = UmountPartitions(timeout - t.duration());
     if (stat != UMOUNT_STAT_SUCCESS) {
         LOG(INFO) << "umount timeout, last resort, kill all and try";
         if (DUMP_ON_UMOUNT_FAILURE) DumpUmountDebuggingInfo(false);
         KillAllProcesses();
         // even if it succeeds, still it is timeout and do not run fsck with all processes killed
-        UmountPartitions(0);
+        UmountPartitions(0ms);
         if (DUMP_ON_UMOUNT_FAILURE) DumpUmountDebuggingInfo(true);
     }
 
@@ -318,26 +355,27 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
         abort();
     }
 
-    constexpr unsigned int shutdownTimeoutDefault = 6;
-    unsigned int shutdownTimeout = shutdownTimeoutDefault;
-    if (SHUTDOWN_ZERO_TIMEOUT) {  // eng build
-        shutdownTimeout = 0;
-    } else {
-        shutdownTimeout =
-            android::base::GetUintProperty("ro.build.shutdown_timeout", shutdownTimeoutDefault);
+    auto shutdown_timeout = 0s;
+    if (!SHUTDOWN_ZERO_TIMEOUT) {
+        constexpr unsigned int shutdown_timeout_default = 6;
+        auto shutdown_timeout_property =
+            android::base::GetUintProperty("ro.build.shutdown_timeout", shutdown_timeout_default);
+        shutdown_timeout = std::chrono::seconds(shutdown_timeout_property);
     }
-    LOG(INFO) << "Shutdown timeout: " << shutdownTimeout;
+    LOG(INFO) << "Shutdown timeout: " << shutdown_timeout.count() << " seconds";
 
     // keep debugging tools until non critical ones are all gone.
     const std::set<std::string> kill_after_apps{"tombstoned", "logd", "adbd"};
     // watchdogd is a vendor specific component but should be alive to complete shutdown safely.
-    const std::set<std::string> to_starts{"watchdogd", "vold", "ueventd"};
+    const std::set<std::string> to_starts{"watchdogd"};
     ServiceManager::GetInstance().ForEachService([&kill_after_apps, &to_starts](Service* s) {
         if (kill_after_apps.count(s->name())) {
             s->SetShutdownCritical();
         } else if (to_starts.count(s->name())) {
             s->Start();
             s->SetShutdownCritical();
+        } else if (s->IsShutdownCritical()) {
+            s->Start();  // start shutdown critical service if not started
         }
     });
 
@@ -351,7 +389,7 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
 
     // optional shutdown step
     // 1. terminate all services except shutdown critical ones. wait for delay to finish
-    if (shutdownTimeout > 0) {
+    if (shutdown_timeout > 0s) {
         LOG(INFO) << "terminating init services";
 
         // Ask all services to terminate except shutdown critical ones.
@@ -360,9 +398,9 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
         });
 
         int service_count = 0;
-        // Up to half as long as shutdownTimeout or 3 seconds, whichever is lower.
-        unsigned int terminationWaitTimeout = std::min<unsigned int>((shutdownTimeout + 1) / 2, 3);
-        while (t.duration_s() < terminationWaitTimeout) {
+        // Up to half as long as shutdown_timeout or 3 seconds, whichever is lower.
+        auto termination_wait_timeout = std::min((shutdown_timeout + 1s) / 2, 3s);
+        while (t.duration() < termination_wait_timeout) {
             ServiceManager::GetInstance().ReapAnyOutstandingChildren();
 
             service_count = 0;
@@ -410,7 +448,7 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
     });
     // 4. sync, try umount, and optionally run fsck for user shutdown
     sync();
-    UmountStat stat = TryUmountAndFsck(runFsck, shutdownTimeout * 1000 - t.duration_ms());
+    UmountStat stat = TryUmountAndFsck(runFsck, shutdown_timeout - t.duration());
     // Follow what linux shutdown is doing: one more sync with little bit delay
     sync();
     std::this_thread::sleep_for(100ms);
@@ -457,6 +495,9 @@ bool HandlePowerctlMessage(const std::string& command) {
         }
     } else if (command == "thermal-shutdown") {  // no additional parameter allowed
         cmd = ANDROID_RB_THERMOFF;
+        // Do not queue "shutdown" trigger since we want to shutdown immediately
+        DoReboot(cmd, command, reboot_target, run_fsck);
+        return true;
     } else {
         command_invalid = true;
     }
@@ -465,6 +506,28 @@ bool HandlePowerctlMessage(const std::string& command) {
         return false;
     }
 
-    DoReboot(cmd, command, reboot_target, run_fsck);
+    LOG(INFO) << "Clear action queue and start shutdown trigger";
+    ActionManager::GetInstance().ClearQueue();
+    // Queue shutdown trigger first
+    ActionManager::GetInstance().QueueEventTrigger("shutdown");
+    // Queue built-in shutdown_done
+    auto shutdown_handler = [cmd, command, reboot_target,
+                             run_fsck](const std::vector<std::string>&) {
+        DoReboot(cmd, command, reboot_target, run_fsck);
+        return 0;
+    };
+    ActionManager::GetInstance().QueueBuiltinAction(shutdown_handler, "shutdown_done");
+
+    // Skip wait for prop if it is in progress
+    ResetWaitForProp();
+
+    // Skip wait for exec if it is in progress
+    if (ServiceManager::GetInstance().IsWaitingForExec()) {
+        ServiceManager::GetInstance().ClearExecWait();
+    }
+
     return true;
 }
+
+}  // namespace init
+}  // namespace android

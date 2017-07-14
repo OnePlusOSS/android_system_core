@@ -25,9 +25,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include "DwarfSection.h"
+
 // Forward declarations.
 class Memory;
 class Regs;
+class Symbols;
 
 struct LoadInfo {
   uint64_t offset;
@@ -44,7 +47,7 @@ enum : uint8_t {
 class ElfInterface {
  public:
   ElfInterface(Memory* memory) : memory_(memory) {}
-  virtual ~ElfInterface() = default;
+  virtual ~ElfInterface();
 
   virtual bool Init() = 0;
 
@@ -68,10 +71,18 @@ class ElfInterface {
   uint64_t dynamic_size() { return dynamic_size_; }
   uint64_t eh_frame_offset() { return eh_frame_offset_; }
   uint64_t eh_frame_size() { return eh_frame_size_; }
+  uint64_t debug_frame_offset() { return debug_frame_offset_; }
+  uint64_t debug_frame_size() { return debug_frame_size_; }
   uint64_t gnu_debugdata_offset() { return gnu_debugdata_offset_; }
   uint64_t gnu_debugdata_size() { return gnu_debugdata_size_; }
 
+  DwarfSection* eh_frame() { return eh_frame_.get(); }
+  DwarfSection* debug_frame() { return debug_frame_.get(); }
+
  protected:
+  template <typename AddressType>
+  void InitHeadersWithTemplate();
+
   template <typename EhdrType, typename PhdrType, typename ShdrType>
   bool ReadAllHeaders();
 
@@ -83,6 +94,9 @@ class ElfInterface {
 
   template <typename DynType>
   bool GetSonameWithTemplate(std::string* soname);
+
+  template <typename SymType>
+  bool GetFunctionNameWithTemplate(uint64_t addr, std::string* name, uint64_t* func_offset);
 
   virtual bool HandleType(uint64_t, uint32_t) { return false; }
 
@@ -105,6 +119,11 @@ class ElfInterface {
 
   uint8_t soname_type_ = SONAME_UNKNOWN;
   std::string soname_;
+
+  std::unique_ptr<DwarfSection> eh_frame_;
+  std::unique_ptr<DwarfSection> debug_frame_;
+
+  std::vector<Symbols*> symbols_;
 };
 
 class ElfInterface32 : public ElfInterface {
@@ -116,15 +135,14 @@ class ElfInterface32 : public ElfInterface {
     return ElfInterface::ReadAllHeaders<Elf32_Ehdr, Elf32_Phdr, Elf32_Shdr>();
   }
 
-  void InitHeaders() override {
-  }
+  void InitHeaders() override { ElfInterface::InitHeadersWithTemplate<uint32_t>(); }
 
   bool GetSoname(std::string* soname) override {
     return ElfInterface::GetSonameWithTemplate<Elf32_Dyn>(soname);
   }
 
-  bool GetFunctionName(uint64_t, std::string*, uint64_t*) override {
-    return false;
+  bool GetFunctionName(uint64_t addr, std::string* name, uint64_t* func_offset) override {
+    return ElfInterface::GetFunctionNameWithTemplate<Elf32_Sym>(addr, name, func_offset);
   }
 };
 
@@ -137,15 +155,14 @@ class ElfInterface64 : public ElfInterface {
     return ElfInterface::ReadAllHeaders<Elf64_Ehdr, Elf64_Phdr, Elf64_Shdr>();
   }
 
-  void InitHeaders() override {
-  }
+  void InitHeaders() override { ElfInterface::InitHeadersWithTemplate<uint64_t>(); }
 
   bool GetSoname(std::string* soname) override {
     return ElfInterface::GetSonameWithTemplate<Elf64_Dyn>(soname);
   }
 
-  bool GetFunctionName(uint64_t, std::string*, uint64_t*) override {
-    return false;
+  bool GetFunctionName(uint64_t addr, std::string* name, uint64_t* func_offset) override {
+    return ElfInterface::GetFunctionNameWithTemplate<Elf64_Sym>(addr, name, func_offset);
   }
 };
 

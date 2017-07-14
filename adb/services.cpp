@@ -31,6 +31,8 @@
 #include <unistd.h>
 #endif
 
+#include <thread>
+
 #include <android-base/file.h>
 #include <android-base/parsenetaddress.h>
 #include <android-base/stringprintf.h>
@@ -259,13 +261,7 @@ static int create_service_thread(void (*func)(int, void *), void *cookie)
     sti->cookie = cookie;
     sti->fd = s[1];
 
-    if (!adb_thread_create(service_bootstrap_func, sti)) {
-        free(sti);
-        adb_close(s[0]);
-        adb_close(s[1]);
-        printf("cannot create service thread\n");
-        return -1;
-    }
+    std::thread(service_bootstrap_func, sti).detach();
 
     D("service thread started, %d:%d",s[0], s[1]);
     return s[0];
@@ -351,7 +347,7 @@ static void wait_for_state(int fd, void* data) {
         std::string error = "unknown error";
         const char* serial = sinfo->serial.length() ? sinfo->serial.c_str() : NULL;
         atransport* t = acquire_one_transport(sinfo->transport_type, serial, &is_ambiguous, &error);
-        if (t != nullptr && (sinfo->state == kCsAny || sinfo->state == t->connection_state)) {
+        if (t != nullptr && (sinfo->state == kCsAny || sinfo->state == t->GetConnectionState())) {
             SendOkay(fd);
             break;
         } else if (!is_ambiguous) {

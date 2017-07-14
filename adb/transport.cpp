@@ -29,9 +29,11 @@
 #include <algorithm>
 #include <list>
 #include <mutex>
+#include <thread>
 
 #include <android-base/logging.h>
 #include <android-base/parsenetaddress.h>
+#include <android-base/quick_exit.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
 
@@ -40,6 +42,7 @@
 #include "adb_trace.h"
 #include "adb_utils.h"
 #include "diagnose_usb.h"
+#include "fdevent.h"
 
 static void transport_unref(atransport *t);
 
@@ -52,6 +55,7 @@ const char* const kFeatureShell2 = "shell_v2";
 const char* const kFeatureCmd = "cmd";
 const char* const kFeatureStat2 = "stat_v2";
 const char* const kFeatureLibusb = "libusb";
+const char* const kFeaturePushSync = "push_sync";
 
 static std::string dump_packet(const char* name, const char* func, apacket* p) {
     unsigned command = p->msg.command;
@@ -208,6 +212,11 @@ static void read_transport_thread(void* _t) {
                 put_apacket(p);
                 break;
             }
+#if ADB_HOST
+            if (p->msg.command == 0) {
+                continue;
+            }
+#endif
         }
 
         D("%s: received remote packet, sending to transport", t->serial);
@@ -270,7 +279,11 @@ static void write_transport_thread(void* _t) {
             if (active) {
                 D("%s: transport got packet, sending to remote", t->serial);
                 ATRACE_NAME("write_transport write_remote");
-                t->write_to_remote(p, t);
+                if (t->Write(p) != 0) {
+                    D("%s: remote write failed for transport", t->serial);
+                    put_apacket(p);
+                    break;
+                }
             } else {
                 D("%s: transport ignoring packet while offline", t->serial);
             }
@@ -388,8 +401,27 @@ asocket* create_device_tracker(void) {
     return &tracker->socket;
 }
 
+// Check if all of the USB transports are connected.
+bool iterate_transports(std::function<bool(const atransport*)> fn) {
+    std::lock_guard<std::mutex> lock(transport_lock);
+    for (const auto& t : transport_list) {
+        if (!fn(t)) {
+            return false;
+        }
+    }
+    for (const auto& t : pending_list) {
+        if (!fn(t)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Call this function each time the transport list has changed.
 void update_transports() {
+    update_transport_status();
+
+    // Notify `adb track-devices` clients.
     std::string transports = list_transports(false);
 
     device_tracker* tracker = device_tracker_list;
@@ -492,7 +524,7 @@ static void transport_registration_func(int _fd, unsigned ev, void* data) {
     }
 
     /* don't create transport threads for inaccessible devices */
-    if (t->connection_state != kCsNoPerm) {
+    if (t->GetConnectionState() != kCsNoPerm) {
         /* initial references are the two threads */
         t->ref_count = 2;
 
@@ -509,13 +541,8 @@ static void transport_registration_func(int _fd, unsigned ev, void* data) {
 
         fdevent_set(&(t->transport_fde), FDE_READ);
 
-        if (!adb_thread_create(write_transport_thread, t)) {
-            fatal_errno("cannot create write_transport thread");
-        }
-
-        if (!adb_thread_create(read_transport_thread, t)) {
-            fatal_errno("cannot create read_transport thread");
-        }
+        std::thread(write_transport_thread, t).detach();
+        std::thread(read_transport_thread, t).detach();
     }
 
     {
@@ -544,6 +571,14 @@ void init_transport_registration(void) {
     fdevent_set(&transport_registration_fde, FDE_READ);
 }
 
+void kick_all_transports() {
+    // To avoid only writing part of a packet to a transport after exit, kick all transports.
+    std::lock_guard<std::mutex> lock(transport_lock);
+    for (auto t : transport_list) {
+        t->Kick();
+    }
+}
+
 /* the fdevent select pump is single threaded */
 static void register_transport(atransport* transport) {
     tmsg m;
@@ -568,15 +603,15 @@ static void remove_transport(atransport* transport) {
 static void transport_unref(atransport* t) {
     CHECK(t != nullptr);
 
-    std::lock_guard<std::mutex> lock(transport_lock);
-    CHECK_GT(t->ref_count, 0u);
-    t->ref_count--;
-    if (t->ref_count == 0) {
+    size_t old_refcount = t->ref_count--;
+    CHECK_GT(old_refcount, 0u);
+
+    if (old_refcount == 1u) {
         D("transport: %s unref (kicking and closing)", t->serial);
         t->close(t);
         remove_transport(t);
     } else {
-        D("transport: %s unref (count=%zu)", t->serial, t->ref_count);
+        D("transport: %s unref (count=%zu)", t->serial, old_refcount - 1);
     }
 }
 
@@ -604,7 +639,7 @@ static int qual_match(const char* to_test, const char* prefix, const char* qual,
 }
 
 atransport* acquire_one_transport(TransportType type, const char* serial, bool* is_ambiguous,
-                                  std::string* error_out) {
+                                  std::string* error_out, bool accept_any_state) {
     atransport* result = nullptr;
 
     if (serial) {
@@ -619,7 +654,7 @@ atransport* acquire_one_transport(TransportType type, const char* serial, bool* 
 
     std::unique_lock<std::mutex> lock(transport_lock);
     for (const auto& t : transport_list) {
-        if (t->connection_state == kCsNoPerm) {
+        if (t->GetConnectionState() == kCsNoPerm) {
 #if ADB_HOST
             *error_out = UsbNoPermissionsLongHelpText();
 #endif
@@ -668,7 +703,7 @@ atransport* acquire_one_transport(TransportType type, const char* serial, bool* 
     lock.unlock();
 
     // Don't return unauthorized devices; the caller can't do anything with them.
-    if (result && result->connection_state == kCsUnauthorized) {
+    if (result && result->GetConnectionState() == kCsUnauthorized && !accept_any_state) {
         *error_out = "device unauthorized.\n";
         char* ADB_VENDOR_KEYS = getenv("ADB_VENDOR_KEYS");
         *error_out += "This adb server's $ADB_VENDOR_KEYS is ";
@@ -680,7 +715,7 @@ atransport* acquire_one_transport(TransportType type, const char* serial, bool* 
     }
 
     // Don't return offline devices; the caller can't do anything with them.
-    if (result && result->connection_state == kCsOffline) {
+    if (result && result->GetConnectionState() == kCsOffline && !accept_any_state) {
         *error_out = "device offline";
         result = nullptr;
     }
@@ -692,16 +727,38 @@ atransport* acquire_one_transport(TransportType type, const char* serial, bool* 
     return result;
 }
 
+int atransport::Write(apacket* p) {
+#if ADB_HOST
+    std::lock_guard<std::mutex> lock(write_msg_lock_);
+#endif
+    return write_func_(p, this);
+}
+
 void atransport::Kick() {
     if (!kicked_) {
         kicked_ = true;
         CHECK(kick_func_ != nullptr);
+#if ADB_HOST
+        // On host, adb server should avoid writing part of a packet, so don't
+        // kick a transport whiling writing a packet.
+        std::lock_guard<std::mutex> lock(write_msg_lock_);
+#endif
         kick_func_(this);
     }
 }
 
+ConnectionState atransport::GetConnectionState() const {
+    return connection_state_;
+}
+
+void atransport::SetConnectionState(ConnectionState state) {
+    check_main_thread();
+    connection_state_ = state;
+}
+
 const std::string atransport::connection_state_name() const {
-    switch (connection_state) {
+    ConnectionState state = GetConnectionState();
+    switch (state) {
         case kCsOffline:
             return "offline";
         case kCsBootloader:
@@ -967,10 +1024,10 @@ void kick_all_tcp_devices() {
 
 void register_usb_transport(usb_handle* usb, const char* serial, const char* devpath,
                             unsigned writeable) {
-    atransport* t = new atransport();
+    atransport* t = new atransport((writeable ? kCsOffline : kCsNoPerm));
 
     D("transport: %p init'ing for usb_handle %p (sn='%s')", t, usb, serial ? serial : "");
-    init_usb_transport(t, usb, (writeable ? kCsOffline : kCsNoPerm));
+    init_usb_transport(t, usb);
     if (serial) {
         t->serial = strdup(serial);
     }
@@ -991,29 +1048,27 @@ void register_usb_transport(usb_handle* usb, const char* serial, const char* dev
 void unregister_usb_transport(usb_handle* usb) {
     std::lock_guard<std::mutex> lock(transport_lock);
     transport_list.remove_if(
-        [usb](atransport* t) { return t->usb == usb && t->connection_state == kCsNoPerm; });
+        [usb](atransport* t) { return t->usb == usb && t->GetConnectionState() == kCsNoPerm; });
 }
 
-int check_header(apacket* p, atransport* t) {
+bool check_header(apacket* p, atransport* t) {
     if (p->msg.magic != (p->msg.command ^ 0xffffffff)) {
-        VLOG(RWX) << "check_header(): invalid magic";
-        return -1;
+        VLOG(RWX) << "check_header(): invalid magic command = " << std::hex << p->msg.command
+                  << ", magic = " << p->msg.magic;
+        return false;
     }
 
     if (p->msg.data_length > t->get_max_payload()) {
         VLOG(RWX) << "check_header(): " << p->msg.data_length
                   << " atransport::max_payload = " << t->get_max_payload();
-        return -1;
+        return false;
     }
 
-    return 0;
+    return true;
 }
 
-int check_data(apacket* p) {
-    if (calculate_apacket_checksum(p) != p->msg.data_check) {
-        return -1;
-    }
-    return 0;
+bool check_data(apacket* p) {
+    return calculate_apacket_checksum(p) == p->msg.data_check;
 }
 
 #if ADB_HOST
@@ -1023,5 +1078,12 @@ std::shared_ptr<RSA> atransport::NextKey() {
     std::shared_ptr<RSA> result = keys_[0];
     keys_.pop_front();
     return result;
+}
+bool atransport::SetSendConnectOnError() {
+    if (has_send_connect_on_error_) {
+        return false;
+    }
+    has_send_connect_on_error_ = true;
+    return true;
 }
 #endif

@@ -54,10 +54,15 @@ class Regs {
 
   virtual uint64_t GetAdjustedPc(uint64_t rel_pc, Elf* elf) = 0;
 
+  virtual void SetFromRaw() = 0;
+
   uint16_t sp_reg() { return sp_reg_; }
   uint16_t total_regs() { return total_regs_; }
 
+  static uint32_t GetMachineType();
   static Regs* RemoteGet(pid_t pid, uint32_t* machine_type);
+  static Regs* CreateFromUcontext(uint32_t machine_type, void* ucontext);
+  static Regs* CreateFromLocal();
 
  protected:
   uint16_t total_regs_;
@@ -66,11 +71,11 @@ class Regs {
 };
 
 template <typename AddressType>
-class RegsTmpl : public Regs {
+class RegsImpl : public Regs {
  public:
-  RegsTmpl(uint16_t total_regs, uint16_t sp_reg, Location return_loc)
+  RegsImpl(uint16_t total_regs, uint16_t sp_reg, Location return_loc)
       : Regs(total_regs, sp_reg, return_loc), regs_(total_regs) {}
-  virtual ~RegsTmpl() = default;
+  virtual ~RegsImpl() = default;
 
   uint64_t GetRelPc(Elf* elf, const MapInfo* map_info) override;
 
@@ -92,36 +97,44 @@ class RegsTmpl : public Regs {
   std::vector<AddressType> regs_;
 };
 
-class RegsArm : public RegsTmpl<uint32_t> {
+class RegsArm : public RegsImpl<uint32_t> {
  public:
   RegsArm();
   virtual ~RegsArm() = default;
 
   uint64_t GetAdjustedPc(uint64_t rel_pc, Elf* elf) override;
+
+  void SetFromRaw() override;
 };
 
-class RegsArm64 : public RegsTmpl<uint64_t> {
+class RegsArm64 : public RegsImpl<uint64_t> {
  public:
   RegsArm64();
   virtual ~RegsArm64() = default;
 
   uint64_t GetAdjustedPc(uint64_t rel_pc, Elf* elf) override;
+
+  void SetFromRaw() override;
 };
 
-class RegsX86 : public RegsTmpl<uint32_t> {
+class RegsX86 : public RegsImpl<uint32_t> {
  public:
   RegsX86();
   virtual ~RegsX86() = default;
 
   uint64_t GetAdjustedPc(uint64_t rel_pc, Elf* elf) override;
+
+  void SetFromRaw() override;
 };
 
-class RegsX86_64 : public RegsTmpl<uint64_t> {
+class RegsX86_64 : public RegsImpl<uint64_t> {
  public:
   RegsX86_64();
   virtual ~RegsX86_64() = default;
 
   uint64_t GetAdjustedPc(uint64_t rel_pc, Elf* elf) override;
+
+  void SetFromRaw() override;
 };
 
 #endif  // _LIBUNWINDSTACK_REGS_H

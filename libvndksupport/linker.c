@@ -31,7 +31,9 @@ void* android_load_sphal_library(const char* name, int flag) {
         };
         void* handle = android_dlopen_ext(name, flag, &dlextinfo);
         if (!handle) {
-            ALOGE("Could not load %s from sphal namespace: %s.", name, dlerror());
+            ALOGE(
+                "Could not load %s from sphal namespace: %s. ",
+                name, dlerror());
         }
         return handle;
     } else {
@@ -43,4 +45,6 @@ void* android_load_sphal_library(const char* name, int flag) {
     }
 }
 
-int android_unload_sphal_library(void* handle) { return dlclose(handle); }
+int android_unload_sphal_library(void* handle) {
+    return dlclose(handle);
+}
