@@ -128,4 +128,8 @@ void healthd_board_init(struct healthd_config *config);
 
 int healthd_board_battery_update(struct android::BatteryProperties *props);
 
+
+// This API is called to turn on/off the display backlight incase it can't be
+// handle correcty in the display driver by calling gr_fg_blank();
+void healthd_board_mode_charger_set_backlight(bool en);
 #endif /* _HEALTHD_H_ */
