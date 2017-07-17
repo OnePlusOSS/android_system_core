@@ -144,4 +144,5 @@ void healthd_board_mode_charger_init(void);
 //about the battery on the animation, such as the SoC (State of Charge).
 void healthd_board_mode_charger_draw_battery(struct android::BatteryProperties *batt_prop);
 
+
 #endif /* _HEALTHD_H_ */

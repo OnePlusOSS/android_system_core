@@ -108,6 +108,7 @@ struct animation {
 struct charger {
     bool have_battery_state;
     bool charger_connected;
+    bool charger_power_key;
     int64_t next_screen_transition;
     int64_t next_key_check;
     int64_t next_pwr_check;
@@ -375,9 +376,10 @@ static void update_screen_state(struct charger *charger, int64_t now)
     }
 
     /* animation is over, blank screen and leave */
-    if (batt_anim->cur_cycle == batt_anim->num_cycles) {
+    if (batt_anim->num_cycles > 0 && batt_anim->cur_cycle == batt_anim->num_cycles) {
         reset_animation(batt_anim);
         charger->next_screen_transition = -1;
+        charger->charger_power_key = false;
         healthd_board_mode_charger_set_backlight(false);
         gr_fb_blank(true);
         LOGV("[%" PRId64 "] animation done\n", now);
@@ -519,6 +521,15 @@ static void process_key(struct charger *charger, int code, int64_t now)
     if (code == KEY_POWER) {
         if (key->down) {
             int64_t reboot_timeout = key->timestamp + POWER_ON_KEY_TIME;
+
+            /* make sure backlight turn off before fb ready for display
+             * when press the power key */
+            if (charger->charger_power_key == false) {
+                healthd_board_mode_charger_set_backlight(false);
+                gr_fb_blank(true);
+                charger->charger_power_key = true;
+            }
+
             if (now >= reboot_timeout) {
                 /* We do not currently support booting from charger mode on
                    all devices. Check the property and continue booting or reboot
