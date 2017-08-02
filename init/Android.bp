@@ -18,7 +18,7 @@ cc_defaults {
     name: "init_defaults",
     cpp_std: "experimental",
     sanitize: {
-        misc_undefined: ["integer"],
+        misc_undefined: ["signed-integer-overflow"],
     },
     cppflags: [
         "-DLOG_UEVENTS=0",
@@ -157,6 +157,7 @@ cc_test {
         "init_test.cpp",
         "property_service_test.cpp",
         "service_test.cpp",
+        "ueventd_test.cpp",
         "util_test.cpp",
     ],
     shared_libs: [

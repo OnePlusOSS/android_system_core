@@ -28,6 +28,10 @@ endif
 
 init_options += -DLOG_UEVENTS=0
 
+ifeq ($(TARGET_USER_MODE_LINUX), true)
+    init_cflags += -DUSER_MODE_LINUX
+endif
+
 init_cflags += \
     $(init_options) \
     -Wall -Wextra \
@@ -92,6 +96,6 @@ LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \
     ln -sf ../init $(TARGET_ROOT_OUT)/sbin/ueventd; \
     ln -sf ../init $(TARGET_ROOT_OUT)/sbin/watchdogd
 
-LOCAL_SANITIZE := integer
+LOCAL_SANITIZE := signed-integer-overflow
 LOCAL_CLANG := true
 include $(BUILD_EXECUTABLE)
