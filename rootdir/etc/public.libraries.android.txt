@@ -22,5 +22,3 @@ libsync.so
 libvulkan.so
 libwebviewchromium_plat_support.so
 libz.so
-libvraudio_client.so
-libqvrservice_client.so

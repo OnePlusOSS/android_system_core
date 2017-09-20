@@ -414,7 +414,7 @@ static void debuggerd_signal_handler(int signal_number, siginfo_t* info, void* c
   };
 
   // Set PR_SET_DUMPABLE to 1, so that crash_dump can ptrace us.
-  int orig_dumpable = prctl(PR_GET_DUMPABLE);
+  //int orig_dumpable = prctl(PR_GET_DUMPABLE);
   if (prctl(PR_SET_DUMPABLE, 1) != 0) {
     fatal_errno("failed to set dumpable");
   }
@@ -435,9 +435,9 @@ static void debuggerd_signal_handler(int signal_number, siginfo_t* info, void* c
   __futex_wait(&thread_info.pseudothread_tid, child_pid, nullptr);
 
   // Restore PR_SET_DUMPABLE to its original value.
-  if (prctl(PR_SET_DUMPABLE, orig_dumpable) != 0) {
-    fatal_errno("failed to restore dumpable");
-  }
+  //if (prctl(PR_SET_DUMPABLE, orig_dumpable) != 0) {
+    //fatal_errno("failed to restore dumpable");
+  //}
 
   // Signals can either be fatal or nonfatal.
   // For fatal signals, crash_dump will PTRACE_CONT us with the signal we
