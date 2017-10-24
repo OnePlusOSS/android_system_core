@@ -610,6 +610,8 @@ on boot
     chown system system /sys/kernel/ipv4/tcp_rmem_def
     chown system system /sys/kernel/ipv4/tcp_rmem_max
     chown root radio /proc/cmdline
+    chmod 0666 /dev/dash/
+    restorecon  /dev/dash
 
     # Define default initial receive window size in segments.
     setprop net.tcp.default_init_rwnd 60
@@ -628,6 +630,7 @@ on property:sys.init_log_level=*
 
 on charger
     class_start charger
+    start dashd
 
 on property:vold.decrypt=trigger_reset_main
     class_reset main
@@ -686,6 +689,12 @@ service healthd /system/bin/healthd
     class core
     critical
     group root system wakelock
+
+service dashd /sbin/dashd
+    class core
+    critical
+    seclabel u:r:dashd:s0
+    group root system
 
 service console /system/bin/sh
     class core
