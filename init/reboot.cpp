@@ -328,6 +328,8 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
     }
     LOG(INFO) << "Shutdown timeout: " << shutdownTimeout;
 
+    property_set("persist.vendor.crash.detect", "false");
+
     // keep debugging tools until non critical ones are all gone.
     const std::set<std::string> kill_after_apps{"tombstoned", "logd", "adbd"};
     // watchdogd is a vendor specific component but should be alive to complete shutdown safely.
