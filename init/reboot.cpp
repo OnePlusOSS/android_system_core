@@ -314,8 +314,8 @@ static UmountStat TryUmountAndFsck(bool runFsck, std::chrono::milliseconds timeo
     Timer t;
     std::vector<MountEntry> block_devices;
     std::vector<MountEntry> emulated_devices;
-
-    TurnOffBacklight();  // this part can take time. save power.
+    //below code move to the place before killing service
+    //TurnOffBacklight();  // this part can take time. save power.
 
     if (runFsck && !FindPartitionsToUmount(&block_devices, &emulated_devices, false)) {
         return UMOUNT_STAT_ERROR;
@@ -368,6 +368,8 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
         }
     }
     LOG(INFO) << "Shutdown timeout: " << shutdown_timeout.count() << " ms";
+
+    property_set("persist.vendor.crash.detect", "false");
 
     // keep debugging tools until non critical ones are all gone.
     const std::set<std::string> kill_after_apps{"tombstoned", "logd", "adbd"};
@@ -431,7 +433,8 @@ void DoReboot(unsigned int cmd, const std::string& reason, const std::string& re
         LOG(INFO) << "Terminating running services took " << t
                   << " with remaining services:" << service_count;
     }
-
+    //turn off backlight before killing services to avoid screen stuck
+    TurnOffBacklight();  // this part can take time. save power.
     // minimum safety steps before restarting
     // 2. kill all services except ones that are necessary for the shutdown sequence.
     ServiceManager::GetInstance().ForEachService([](Service* s) {
