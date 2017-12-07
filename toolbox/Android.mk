@@ -59,3 +59,38 @@ $(INPUT_H_LABELS_H): PRIVATE_CUSTOM_TOOL = $(PRIVATE_LOCAL_PATH)/generate-input.
 $(INPUT_H_LABELS_H): $(LOCAL_PATH)/Android.mk $(LOCAL_PATH)/generate-input.h-labels.py $(UAPI_INPUT_EVENT_CODES_H)
 $(INPUT_H_LABELS_H):
 	$(transform-generated-source)
+
+
+# static version to be installed in /vendor
+#
+include $(CLEAR_VARS)
+BSD_TOOLS := \
+    dd \
+
+OUR_TOOLS := \
+    getevent \
+    newfs_msdos \
+
+ALL_TOOLS = $(BSD_TOOLS) $(OUR_TOOLS)
+
+LOCAL_SRC_FILES := \
+    toolbox.c \
+    $(patsubst %,%.c,$(OUR_TOOLS)) \
+
+LOCAL_CFLAGS += $(common_cflags)
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/upstream-netbsd/include/ \
+                     $(intermediates)
+
+LOCAL_SHARED_LIBRARIES := \
+    libcutils \
+
+LOCAL_WHOLE_STATIC_LIBRARIES := $(patsubst %,libtoolbox_%,$(BSD_TOOLS))
+
+LOCAL_VENDOR_MODULE := true
+
+LOCAL_MODULE := toolbox_vendor
+
+# Install the symlinks.
+LOCAL_POST_INSTALL_CMD := $(hide) $(foreach t,$(ALL_TOOLS),ln -sf ${LOCAL_MODULE} $(TARGET_OUT_VENDOR_EXECUTABLES)/$(t);)
+
+include $(BUILD_EXECUTABLE)
