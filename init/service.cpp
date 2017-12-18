@@ -254,9 +254,7 @@ void Service::SetProcessAttributes() {
             PLOG(FATAL) << "prctl(PR_GET_SECUREBITS) failed for " << name_;
         }
         securebits |= SECBIT_KEEP_CAPS | SECBIT_KEEP_CAPS_LOCKED;
-        /* Fix me*/
-        //if (prctl(PR_SET_SECUREBITS, securebits) != 0) {
-        if (prctl(PR_SET_SECUREBITS, SECBIT_KEEP_CAPS | SECBIT_KEEP_CAPS_LOCKED) != 0) {
+        if (prctl(PR_SET_SECUREBITS, securebits) != 0) {
             PLOG(FATAL) << "prctl(PR_SET_SECUREBITS) failed for " << name_;
         }
     }
