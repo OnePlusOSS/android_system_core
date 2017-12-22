@@ -210,6 +210,20 @@ bool WriteFile(const std::string& path, const std::string& content, std::string*
     return true;
 }
 
+bool write_file_follow(const std::string& path, const std::string& content) {
+    android::base::unique_fd fd(TEMP_FAILURE_RETRY(
+        open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600)));
+    if (fd == -1) {
+        PLOG(ERROR) << "write_file: Unable to open '" << path << "'";
+        return false;
+    }
+    bool success = android::base::WriteStringToFd(content, fd);
+    if (!success) {
+        PLOG(ERROR) << "write_file: Unable to write to '" << path << "'";
+    }
+    return success;
+}
+
 int mkdir_recursive(const std::string& path, mode_t mode, selabel_handle* sehandle) {
     std::string::size_type slash = 0;
     while ((slash = path.find('/', slash + 1)) != std::string::npos) {
