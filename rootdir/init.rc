@@ -274,6 +274,7 @@ on late-init
     # '--early' can be specified to skip entries with 'latemount'.
     # /system and /vendor must be mounted by the end of the fs stage,
     # while /data is optional.
+    trigger factory-fs
     trigger fs
     trigger post-fs
 
@@ -299,6 +300,7 @@ on late-init
 
     trigger early-boot
     trigger boot
+    trigger mmi
 
 on post-fs
     # Load properties from

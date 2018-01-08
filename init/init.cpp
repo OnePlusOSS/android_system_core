@@ -1173,9 +1173,6 @@ int main(int argc, char** argv) {
     std::string bootmode = GetProperty("ro.bootmode", "");
     if (bootmode == "charger") {
         am.QueueEventTrigger("charger");
-    } else if ((strncmp(bootmode.c_str(), "ffbm-00", 7) == 0)
-        || (strncmp(bootmode.c_str(), "ffbm-01", 7) == 0)) {
-        am.QueueEventTrigger("ffbm");
     } else {
         am.QueueEventTrigger("late-init");
     }
